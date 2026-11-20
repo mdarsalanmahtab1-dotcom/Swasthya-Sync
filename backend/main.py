@@ -11,8 +11,8 @@ Endpoints:
   POST     /api/session   — create a new session
   POST     /api/ocr       — upload and process a document image
   GET      /api/record/{session_id} — get the patient record
-  POST     /api/stt       — speech to text
-  POST     /api/tts       — text to speech
+  POST     /api/stt       — speech to text (Gemini Transcribe / Sarvam)
+  POST     /api/tts       — text to speech (Gemini TTS / Sarvam)
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ os.makedirs("uploads", exist_ok=True)
 
 from dialogue_manager import DialogueManager
 from ocr_pipeline import process_document
-import sarvam_client
+import speech_provider
 from routes_extended import extended_router, set_sessions_ref, escalate_queue_priority
 from routes_admin import admin_router
 
@@ -379,17 +379,19 @@ async def speech_to_text_endpoint(
     language: str = Form("hi-IN"),
 ):
     """
-    Convert patient voice to text using Sarvam AI.
-    Accepts WebM/WAV/MP3 audio blob from the browser.
-    Returns transcript and detected language.
+    Convert patient voice to text (Gemini Transcribe by default; SPEECH_PROVIDER=sarvam optional).
+    Accepts WebM/OGG/MP4/WAV/MP3 audio from the browser (max 2 MB).
+    Returns transcript and language.
     """
     t0 = time.time()
     audio_bytes = await audio.read()
+    if len(audio_bytes) > speech_provider.MAX_STT_BYTES:
+        return JSONResponse(status_code=413, content={"error": "Audio too large (max 2 MB)"})
 
-    logger.info(f"STT endpoint: received {len(audio_bytes)} bytes, language={language}, content_type={audio.content_type}")
-
-    # Detect format from content type or filename
-    content_type = audio.content_type or "audio/webm"
+    # Detect format from content type
+    content_type = (audio.content_type or "audio/webm").lower()
+    if not content_type.startswith("audio/") and content_type not in ("application/octet-stream", "video/webm"):
+        return JSONResponse(status_code=415, content={"error": "Unsupported audio type"})
     fmt = "webm"
     if "wav" in content_type:
         fmt = "wav"
@@ -397,19 +399,21 @@ async def speech_to_text_endpoint(
         fmt = "mp3"
     elif "ogg" in content_type:
         fmt = "ogg"
+    elif "mp4" in content_type or "m4a" in content_type or "aac" in content_type:
+        fmt = "mp4"
 
-    # Run in thread pool — sarvam_client uses synchronous httpx
     loop = asyncio.get_event_loop()
     result = await loop.run_in_executor(
         None,
-        sarvam_client.speech_to_text,
+        speech_provider.speech_to_text,
         audio_bytes,
         language,
         fmt,
     )
 
     elapsed = time.time() - t0
-    logger.info(f"STT endpoint total: {elapsed:.2f}s | transcript='{result.get('transcript', '')[:60]}'")
+    # Privacy: log sizes and timings only — never the transcript.
+    logger.info(f"STT: {len(audio_bytes)}B {fmt} lang={language} -> {len(result.get('transcript', ''))} chars in {elapsed:.2f}s")
     return result
 
 
@@ -420,24 +424,25 @@ async def text_to_speech_endpoint(
     speaker: str = Form(""),
 ):
     """
-    Convert text to speech using Sarvam AI.
+    Convert text to speech (Gemini TTS by default; SPEECH_PROVIDER=sarvam optional).
     Returns WAV audio bytes directly for browser playback.
     """
     t0 = time.time()
-    logger.info(f"TTS endpoint: text='{text[:60]}', language={language}")
+    if len(text) > 5000:
+        return JSONResponse(status_code=413, content={"error": "Text too long"})
 
-    # Run in thread pool — sarvam_client uses synchronous httpx
     loop = asyncio.get_event_loop()
     audio_bytes = await loop.run_in_executor(
         None,
-        sarvam_client.text_to_speech,
+        speech_provider.text_to_speech,
         text,
         language,
         speaker if speaker else None,
     )
 
     elapsed = time.time() - t0
-    logger.info(f"TTS endpoint total: {elapsed:.2f}s | audio_size={len(audio_bytes)} bytes")
+    # Privacy: log sizes and timings only — never the text.
+    logger.info(f"TTS: {len(text)} chars lang={language} -> {len(audio_bytes)}B in {elapsed:.2f}s")
 
     if not audio_bytes:
         return JSONResponse(status_code=503, content={"error": "TTS unavailable"})

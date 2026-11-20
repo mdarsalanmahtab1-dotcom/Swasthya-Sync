@@ -217,93 +217,6 @@ def speech_to_text(
         }
 
 
-def _google_tts_fallback(text: str, language_code: str = "bn-IN") -> bytes:
-    """
-    High-quality authentic native fallback TTS via Google TTS service.
-    Produces clear native pronunciation for Bengali ('bn'), Hindi ('hi'),
-    Tamil ('ta'), Telugu ('te'), Kannada ('kn'), English ('en'), etc.
-    Returns MP3 audio bytes.
-    """
-    import urllib.request
-    import urllib.parse
-
-    if not text or not text.strip():
-        return b""
-
-    # Map BCP-47 / language_code to Google TTS 2-letter language code
-    lang_map = {
-        "bn-IN": "bn",
-        "bn": "bn",
-        "hi-IN": "hi",
-        "hi": "hi",
-        "ta-IN": "ta",
-        "ta": "ta",
-        "te-IN": "te",
-        "te": "te",
-        "kn-IN": "kn",
-        "kn": "kn",
-        "mr-IN": "mr",
-        "mr": "mr",
-        "gu-IN": "gu",
-        "gu": "gu",
-        "ml-IN": "ml",
-        "ml": "ml",
-        "pa-IN": "pa",
-        "pa": "pa",
-        "en-IN": "en",
-        "en": "en",
-    }
-    target_tl = lang_map.get(language_code, language_code.split("-")[0].lower() or "en")
-
-    # Split text into chunks under 140 chars for Google Translate TTS limits
-    words = text.strip().split()
-    chunks: list[str] = []
-    current_chunk = ""
-    for word in words:
-        if len(current_chunk) + len(word) + 1 > 140:
-            if current_chunk:
-                chunks.append(current_chunk)
-            current_chunk = word
-        else:
-            current_chunk = f"{current_chunk} {word}".strip()
-    if current_chunk:
-        chunks.append(current_chunk)
-
-    if not chunks:
-        chunks = [text[:140]]
-
-    combined_mp3 = bytearray()
-    t0 = time.time()
-    for chunk in chunks:
-        url = (
-            f"https://translate.google.com/translate_tts"
-            f"?ie=UTF-8&q={urllib.parse.quote(chunk)}&tl={target_tl}&client=tw-ob"
-        )
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "WebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=8.0) as resp:
-                if resp.status == 200:
-                    combined_mp3.extend(resp.read())
-        except Exception as e:
-            logger.warning(f"Google TTS fallback chunk failed ({target_tl}): {e}")
-
-    elapsed = time.time() - t0
-    logger.info(
-        f"Google TTS fallback completed in {elapsed:.2f}s | "
-        f"chunks={len(chunks)} | bytes={len(combined_mp3)} | lang={target_tl}"
-    )
-    return bytes(combined_mp3)
-
-
 def text_to_speech(
     text: str,
     language_code: str = "hi-IN",
@@ -326,7 +239,7 @@ def text_to_speech(
     # If Sarvam is not configured, directly use the Google TTS native audio
     if not _is_configured():
         logger.info(f"Sarvam not configured — using Google TTS fallback for {language_code}")
-        return _google_tts_fallback(text, language_code)
+        return b""
 
     selected_speaker = speaker or TTS_SPEAKER.get(language_code, "priya")
 
@@ -367,7 +280,7 @@ def text_to_speech(
             return all_audio[0]
 
         logger.warning("Sarvam TTS returned empty audio — falling back to Google TTS")
-        return _google_tts_fallback(text, language_code)
+        return b""
 
     except httpx.HTTPStatusError as e:
         elapsed = time.time() - t0
@@ -375,11 +288,11 @@ def text_to_speech(
             f"Sarvam TTS HTTP error after {elapsed:.2f}s ({e.response.status_code}) "
             f"— falling back to native Google TTS for {language_code}"
         )
-        return _google_tts_fallback(text, language_code)
+        return b""
     except Exception as e:
         elapsed = time.time() - t0
         logger.warning(f"Sarvam TTS failed after {elapsed:.2f}s: {e} — falling back to native Google TTS")
-        return _google_tts_fallback(text, language_code)
+        return b""
 
 
 def _chunk_text(text: str, max_chars: int = 490) -> list[str]:
