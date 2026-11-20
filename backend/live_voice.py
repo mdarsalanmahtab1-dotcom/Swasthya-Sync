@@ -495,11 +495,22 @@ class LiveVoice:
         pcm = bytes(self.audio_buf)
         self.audio_buf = bytearray()
         self.turn_handled = True
-        if not pcm:
-            self.phase = "idle"
-            return
-        import speech_provider
         loop = asyncio.get_running_loop()
+        if not pcm:
+            typed = self.in_text.strip()
+            if typed:
+                # The patient tapped/typed this turn: let the text engine handle it
+                logger.info("Live fallback: handling the typed/tapped answer with the text engine")
+                await self._engine_turn(typed)
+            else:
+                # Nothing to process: re-send the current question so the kiosk never stays stuck
+                async with self.dm_lock:
+                    ui = await loop.run_in_executor(None, self.dm.resume_session)
+                await self.send({"type": "ui", **ui})
+                self.phase = "idle"
+            return
+        logger.info(f"Live fallback: transcribing {len(pcm)} B of buffered audio with the backup STT")
+        import speech_provider
         res = await loop.run_in_executor(
             None, speech_provider.speech_to_text, _pcm_to_wav(pcm, IN_RATE), self.dm.language, "wav")
         await self._engine_turn((res or {}).get("transcript", "").strip())
