@@ -4,15 +4,15 @@
 ### **Next-Generation Multimodal Clinical Intake, Document Intelligence & OPD Triage Kiosk**
 #### *Bridging the First-Mile Healthcare Bottleneck in Indian Public Hospitals & AYUSH Institutions*
 
-[![SIH 2024](https://img.shields.io/badge/SIH%202024-Problem%20Statement%2026047-blue?style=for-the-badge&logo=target)](https://www.sih.gov.in/)
+[![Google Startup Buildathon 2026](https://img.shields.io/badge/Google%20Startup%20Buildathon-2026-4285F4?style=for-the-badge&logo=google&logoColor=white)]()
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
-[![React 18](https://img.shields.io/badge/React-18.3-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178C6?style=for-the-badge&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Supabase](https://img.shields.io/badge/Supabase-PostgreSQL%2015-3ECF8E?style=for-the-badge&logo=supabase&logoColor=white)](https://supabase.com)
-[![Google Gemini](https://img.shields.io/badge/Google%20Gemini-1.5%20Flash-8E75C2?style=for-the-badge&logo=google&logoColor=white)](https://ai.google.dev/)
-[![Sarvam AI](https://img.shields.io/badge/Sarvam%20AI-11%20Indic%20Languages-FF6F00?style=for-the-badge)](https://www.sarvam.ai/)
-[![ABDM M1](https://img.shields.io/badge/ABDM%20M1-Ready-orange?style=for-the-badge)](https://abdm.gov.in/)
-[![DPDP Act 2023](https://img.shields.io/badge/Compliance-DPDP%20Act%202023-success?style=for-the-badge)]()
+[![React](https://img.shields.io/badge/React-19-61DAFB?style=for-the-badge&logo=react&logoColor=black)](https://react.dev/)
+[![Gemini](https://img.shields.io/badge/Gemini-3.5%20Flash--Lite%20%7C%203.8%20Flash-8E75C2?style=for-the-badge&logo=google&logoColor=white)](https://ai.google.dev/)
+[![Gemini Speech](https://img.shields.io/badge/Gemini-Transcribe%20%2B%20TTS-8E75C2?style=for-the-badge&logo=google&logoColor=white)](https://ai.google.dev/)
+[![Cloud Run](https://img.shields.io/badge/Cloud%20Run-asia--south1-4285F4?style=for-the-badge&logo=googlecloud&logoColor=white)](https://cloud.google.com/run)
+[![Firebase Hosting](https://img.shields.io/badge/Firebase-Hosting-FFCA28?style=for-the-badge&logo=firebase&logoColor=black)](https://firebase.google.com/docs/hosting)
+[![Postgres](https://img.shields.io/badge/AlloyDB%20%2F%20Postgres-asyncpg-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)]()
+[![Cloud Storage](https://img.shields.io/badge/Cloud%20Storage-private%20bucket-4285F4?style=for-the-badge&logo=googlecloud&logoColor=white)]()
 
 ---
 
@@ -118,6 +118,31 @@ While the Ayushman Bharat Digital Mission (ABDM) has built national digital rail
 | **ABDM M1 & DPDP Act 2023** | Simulated ABDM M1 OTP verification flow, deterministic avatar generation, and automatic session isolation. | 100% compliant with Indian digital health data laws; no cross-patient session contamination. |
 
 ---
+
+## ☁️ Google Cloud Architecture (Buildathon 2026)
+
+```
+Patient kiosk / Doctor / Nurse / Admin  (Firebase Hosting, React)
+        │ HTTPS REST + WSS (/ws/session)
+        ▼
+Cloud Run: swasthyasync-api (FastAPI, asia-south1) ── Secret Manager
+   ├── Gemini 3.5 Flash-Lite / 3.8 Flash  (schema, extraction, questions, summary, OCR)
+   ├── Gemini 3.5 Transcribe (speech → text)   ├── Gemini 3.8 TTS (text → speech)
+   ├── AlloyDB / Postgres (asyncpg)            └── Cloud Storage (private patient documents)
+```
+
+Details: [docs/ARCHITECTURE_GOOGLE.md](docs/ARCHITECTURE_GOOGLE.md) · Deploy: [deploy/README_DEPLOY.md](deploy/README_DEPLOY.md)
+
+## 🔐 Security & privacy — what we actually do
+
+- **Staff auth on the server:** doctor, nurse and admin endpoints need a token checked on the server (12-hour expiry). The walk-in kiosk needs no login and only touches its own session (random UUID).
+- **Passwords** are salted and hashed with scrypt. Old hashes are upgraded on login. No credentials live in the frontend.
+- **AI prompts never contain the patient's name, phone or ABHA number.** The greeting uses a `{{NAME}}` placeholder filled in by code. Document name checks happen in code. Uploaded document photos are read by Gemini only to extract clinical data.
+- **No invented data:** if the AI fails, the doctor sees "AI unavailable — verify manually" and empty fields, never placeholder medicines.
+- **Red flags** are caught by deterministic rules in code as well as by the model.
+- **Documents** are stored in a private Cloud Storage bucket and served only through an authenticated endpoint (no public or signed URLs).
+- **Secrets** are kept in Secret Manager. CORS only allows our own frontend. Uploads have size and type limits. STT, TTS, OTP and login endpoints are rate-limited. Logs record sizes and timings, never transcripts or names.
+- Hosted in India (Mumbai, asia-south1). Encrypted in transit (HTTPS) and at rest (Google Cloud defaults). Designed to align with the DPDP Act 2023 and ABDM guidelines (not certified).
 
 ## 🏗️ System Architecture & "Why This Architecture?"
 

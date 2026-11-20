@@ -1,6 +1,6 @@
 import React, { useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { MonitorSmartphone, ActivitySquare, Stethoscope, ShieldCheck, ExternalLink, Wifi, FileText, Lock, Scale, Info, CheckCircle2, Send, Code2, Link2, MessageCircle, Globe, Mail, Phone, MapPin, Heart, Sparkles, Scan, ArrowRight } from 'lucide-react';
+import { MonitorSmartphone, ActivitySquare, Stethoscope, ShieldCheck, ExternalLink, Wifi, FileText, Lock, Scale, Info, CheckCircle2, Send, Code2, Link2, MessageCircle, Globe, Mail, Phone, MapPin, Sparkles, Scan, ArrowRight } from 'lucide-react';
 import { motion, useScroll, useTransform, useSpring } from 'framer-motion';
 import QRCode from 'react-qr-code';
 import logoPNG from '../assets/logoPNG.png';
@@ -328,11 +328,11 @@ export const DemoSwitcher: React.FC = () => {
                     </div>
                     <div className="bg-blue-50/50 rounded-2xl p-5 border border-blue-100">
                       <p className="text-sm text-slate-600 leading-relaxed mb-3">
-                        SwasthyaSync operates under strict compliance with the <strong className="text-slate-800">Digital Personal Data Protection (DPDP) Act, 2023</strong> and adheres to <strong className="text-slate-800">ABDM (Ayushman Bharat Digital Mission)</strong> guidelines.
+                        SwasthyaSync is designed to align with the <strong className="text-slate-800">Digital Personal Data Protection (DPDP) Act, 2023</strong> and <strong className="text-slate-800">ABDM (Ayushman Bharat Digital Mission)</strong> guidelines.
                       </p>
                       <ul className="list-disc list-inside text-xs sm:text-sm text-slate-600 space-y-2 ml-1">
-                        <li>All patient identifiers are anonymized during LLM processing.</li>
-                        <li>Data is encrypted at rest (AES-256) and in transit (TLS 1.3).</li>
+                        <li>Patient name, phone and ABHA number are never put into AI prompts (uploaded documents are read by Gemini only to extract clinical data).</li>
+                        <li>Encrypted in transit (HTTPS) and at rest (Google Cloud), hosted in India (Mumbai region).</li>
                         <li>Patient consent is explicitly recorded before session initiation.</li>
                       </ul>
                     </div>
@@ -456,15 +456,15 @@ export const DemoSwitcher: React.FC = () => {
                   <div className="space-y-2.5 text-xs text-slate-500">
                     <div className="flex items-center gap-2">
                       <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
-                      <span>ABDM & DPDP Compliant</span>
+                      <span>Designed to align with DPDP Act 2023 &amp; ABDM guidelines</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <Lock className="w-3.5 h-3.5 text-blue-400" />
-                      <span>End-to-End Encryption</span>
+                      <span>Encrypted in transit (HTTPS) and at rest (Google Cloud)</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <CheckCircle2 className="w-3.5 h-3.5 text-teal-400" />
-                      <span>ISO 27001 Architecture</span>
+                      <span>Hosted in India (Mumbai region)</span>
                     </div>
                   </div>
                 </div>
@@ -482,7 +482,7 @@ export const DemoSwitcher: React.FC = () => {
                   <a href="#" className="hover:text-white transition-colors">Accessibility</a>
                 </nav>
                 <p className="text-xs text-slate-600 flex items-center gap-1">
-                  Built with <Heart className="w-3 h-3 text-rose-500 fill-rose-500" /> for SIH 2025
+                  Built by Team CodeNode · Google Startup Buildathon 2026
                 </p>
               </div>
             </div>

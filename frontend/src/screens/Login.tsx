@@ -1103,7 +1103,7 @@ export function Login({ onSessionStarted }: Props) {
                 <div className="relative z-10 flex flex-wrap items-center gap-4 text-[11px] font-semibold text-slate-500 pt-2 border-t border-slate-200/70">
                   <div className="flex items-center gap-1.5 text-slate-600">
                     <ShieldCheck className="w-3.5 h-3.5 text-blue-600" />
-                    <span>DPDP Act 2023 Compliant</span>
+                    <span>Designed to align with DPDP Act 2023</span>
                   </div>
                   <div className="flex items-center gap-1.5 text-slate-600">
                     <Fingerprint className="w-3.5 h-3.5 text-purple-600" />
