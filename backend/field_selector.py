@@ -33,6 +33,11 @@ PRIORITY_ORDER = {
 ANCHOR_SORT_POSITION = -1  # Guaranteed to sort before 0 (critical)
 
 
+# Marker stored when a field was asked MAX_ASKS times without an answer. Chosen so it contains
+# none of the red-flag keywords ("no", "yes", "nahi", ...), so it can never trigger a rule.
+UNANSWERED_VALUE = "Unanswered"
+
+
 def _is_condition_met(field: dict, filled_state: dict) -> bool:
     """
     Check if a field's conditional_on prerequisite is satisfied.
@@ -57,6 +62,8 @@ def _is_condition_met(field: dict, filled_state: dict) -> bool:
     # Get the actual value
     entry = filled_state.get(cond_field_id, {})
     actual = str(entry.get("value", "")).lower().strip() if isinstance(entry, dict) else ""
+    if isinstance(entry, dict) and entry.get("unanswered"):
+        actual = ""  # an unanswered prerequisite never unlocks its follow-up questions
 
     # Wildcard: any non-empty value satisfies the condition
     if expected == "*":

@@ -52,15 +52,23 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+# Gemini Live (low-latency voice). VOICE_MODE=live uses it with automatic fallback to the
+# STT/TTS pipeline; VOICE_MODE=legacy disables it.
+VOICE_MODE: str = (os.environ.get("VOICE_MODE", "live") or "live").strip().lower()
+LIVE_MODEL: str = os.environ.get("GEMINI_LIVE_MODEL", "").strip() or "gemini-3.8-live"
+LIVE_VOICE: str = os.environ.get("GEMINI_LIVE_VOICE", "").strip() or "Kore"
+
+
 # Per-call time limits (seconds). Raise them on slow networks; each model in a cascade gets this long.
 FAST_TIMEOUT: float = _env_float("GEMINI_FAST_TIMEOUT", 12.0)            # per-turn extraction / questions
 REASONING_TIMEOUT: float = _env_float("GEMINI_REASONING_TIMEOUT", 20.0)  # summary, document entities
 SCHEMA_TIMEOUT: float = _env_float("GEMINI_SCHEMA_TIMEOUT", 25.0)        # one-time interview schema
+LIVE_TIMEOUT: float = _env_float("GEMINI_LIVE_TIMEOUT", 12.0)            # Live: max wait for a reply
 
 
 def all_configured_models() -> list[str]:
     seen: list[str] = []
-    for m in [*FAST_MODELS, *REASONING_MODELS, *VISION_MODELS, STT_MODEL, TTS_MODEL]:
+    for m in [*FAST_MODELS, *REASONING_MODELS, *VISION_MODELS, STT_MODEL, TTS_MODEL, LIVE_MODEL]:
         if m not in seen:
             seen.append(m)
     return seen

@@ -29,6 +29,35 @@ from complaint_qualifier import needs_qualification, build_enriched_complaint
 
 logger = logging.getLogger(__name__)
 
+def _normalize_answer(value) -> str:
+    """Make Live's answers match what the deterministic red-flag rules look for
+    (they match words like "yes"/"no", so booleans must become Yes/No)."""
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    v = str(value or "").strip()
+    low = v.lower()
+    if low in ("true", "yes", "y", "present", "positive"):
+        return "Yes"
+    if low in ("false", "no", "n", "absent", "negative", "none"):
+        return "No"
+    return v
+
+
+# Tap options shown under questions spoken by Gemini Live
+_YES_NO = {
+    "en-IN": ("Yes", "No", "Not sure"),
+    "hi-IN": ("हाँ", "नहीं", "पता नहीं"),
+    "bn-IN": ("হ্যাঁ", "না", "জানি না"),
+    "ta-IN": ("ஆம்", "இல்லை", "தெரியவில்லை"),
+    "te-IN": ("అవును", "కాదు", "తెలియదు"),
+    "kn-IN": ("ಹೌದು", "ಇಲ್ಲ", "ಗೊತ್ತಿಲ್ಲ"),
+    "mr-IN": ("हो", "नाही", "माहीत नाही"),
+    "gu-IN": ("હા", "ના", "ખબર નથી"),
+    "ml-IN": ("അതെ", "ഇല്ല", "അറിയില്ല"),
+    "pa-IN": ("ਹਾਂ", "ਨਹੀਂ", "ਪਤਾ ਨਹੀਂ"),
+    "or-IN": ("ହଁ", "ନା", "ଜାଣି ନାହିଁ"),
+}
+
 
 class DialogueManager:
     """
@@ -46,6 +75,13 @@ class DialogueManager:
         # before generating the schema.
         self._pending_qualifier: dict | None = None
         self._raw_chief_complaint: str = ""
+        # Loop guard: how many times each field has been asked. After MAX_ASKS without an
+        # answer the field is marked "Unanswered" and never asked again (no repeats, no loops).
+        self.asked_counts: dict[str, int] = {}
+        # True while Gemini Live is speaking for this session: Live phrases each question from the
+        # field the engine selected, so the text-model question writer is skipped (faster, and no
+        # dependency on the text API inside the loop). Set by live_voice.LiveVoice.
+        self.live_mode: bool = False
 
     # ──────────────────────────────────────────────────────────────────
     # PUBLIC API
@@ -389,56 +425,13 @@ class DialogueManager:
             )
             logger.debug(f"Filled: {fid} = {entry.get('value')}")
 
-        # 3.5 FORK CHECK: Did we just fill a fork_eligible field with a significant answer?
-        for fid, entry in extracted.items():
-            field_spec = next((f for f in schema.get("fields", []) if f["id"] == fid), None)
-            if field_spec and field_spec.get("fork_eligible", False):
-                fork_result = conversation_engine.check_and_generate_fork_questions(
-                    parent_field=field_spec,
-                    patient_answer=str(entry.get("value", "")),
-                    chief_complaint=self.record.chief_complaint.value if self.record.chief_complaint else "",
-                    language=self.language,
-                    doctor_custom_instructions=self.record.doctor_custom_instructions,
-                )
-                if fork_result:
-                    # Inject sub-fields into the live schema
-                    existing_ids = {f["id"] for f in schema["fields"]}
-                    for sub_field in fork_result:
-                        sub_id = sub_field["id"]
-                        if sub_id not in existing_ids:
-                            schema["fields"].append(sub_field)
-                            self.record.filled_state[sub_id] = {"value": None, "confidence": 0.0}
-                    logger.info(f"Fork triggered on '{fid}': injected {len(fork_result)} sub-fields")
+        ui, next_field = self._after_answers(extracted)
+        if ui is not None:
+            return ui
 
-        # 4. SAFETY CHECK: run deterministic rules
-        safety_flags = check_safety(self.record.filled_state)
-        if safety_flags:
-            existing_ids = {f.rule_id for f in self.record.red_flags}
-            new_flags = [f for f in safety_flags if f.rule_id not in existing_ids]
-            if new_flags:
-                self.record.red_flags.extend(new_flags)
-                self.fsm.trigger_redflag()
-                self.record.macro_state = self.fsm.state
-                return self._build_ui_instruction(red_flags=new_flags)
-
-        # 5. CHECK COMPLETION
-        if field_selector.is_interview_complete(
-            schema, self.record.filled_state, self.record.interview_turn_count
-        ):
-            logger.info(f"Interview complete at turn {self.record.interview_turn_count}")
-            self.fsm.advance()  # → DOCUMENT_SCAN
-            self.record.macro_state = self.fsm.state
-            # Removed db checkpoint here, handled in main.py
-            return self._build_ui_instruction()
-
-        # 6. SELECT NEXT FIELD
-        next_field = field_selector.next_field(schema, self.record.filled_state)
-        if next_field is None:
-            # All fields filled — advance
-            self.fsm.advance()
-            self.record.macro_state = self.fsm.state
-            # Removed db checkpoint here, handled in main.py
-            return self._build_ui_instruction()
+        if self.live_mode:
+            self.note_asked(next_field["id"])
+            return self.live_field_ui(next_field)
 
         # 7. GENERATE QUESTION for the selected field
         result = conversation_engine.generate_question(
@@ -458,11 +451,200 @@ class DialogueManager:
         self.record.add_conversation_message(
             "assistant", result.spoken_text, next_field.get("category", "HPI")
         )
+        self.note_asked(next_field["id"])
 
         # Removed db checkpoint here, handled in main.py
 
         # 8. Build UI response
         return self._build_dynamic_ui(result, next_field)
+
+    # ──────────────────────────────────────────────────────────────────
+    # SHARED: after answers are known (used by the text engine AND Gemini Live)
+    # ──────────────────────────────────────────────────────────────────
+
+    MAX_ASKS = 2  # upper bound (red-flag safety fields); ordinary fields are asked once
+
+    @staticmethod
+    def max_asks(field: dict) -> int:
+        """Ordinary fields are asked once. Red-flag safety fields get ONE simpler re-ask,
+        because silently skipping e.g. a stroke-sign question is clinically risky."""
+        return 2 if field.get("red_flag") else 1
+
+    def note_asked(self, field_id: str) -> int:
+        self.asked_counts[field_id] = self.asked_counts.get(field_id, 0) + 1
+        return self.asked_counts[field_id]
+
+    def select_next_field(self) -> dict | None:
+        """next_field() with the loop guard: fields asked max_asks() times are marked Unanswered."""
+        schema = self.record.dynamic_schema or {"fields": []}
+        for _ in range(len(schema.get("fields", [])) + 1):
+            nf = field_selector.next_field(schema, self.record.filled_state)
+            if nf is None:
+                return None
+            if self.asked_counts.get(nf["id"], 0) >= self.max_asks(nf):
+                self.record.filled_state[nf["id"]] = {
+                    "value": field_selector.UNANSWERED_VALUE, "confidence": 0.0, "unanswered": True,
+                }
+                logger.info(f"Field '{nf['id']}' asked {self.asked_counts[nf['id']]}x without an answer — marked Unanswered")
+                continue
+            return nf
+        return None
+
+    def _after_answers(self, extracted: dict) -> tuple[dict | None, dict | None]:
+        """Fork check -> deterministic safety rules -> completion -> next field.
+        Returns (ui, None) when the interview leaves the question loop, else (None, next_field)."""
+        schema = self.record.dynamic_schema or {"fields": []}
+
+        # FORK CHECK: did we just fill a fork_eligible field with a significant answer?
+        for fid, entry in extracted.items():
+            field_spec = next((f for f in schema.get("fields", []) if f["id"] == fid), None)
+            if field_spec and field_spec.get("fork_eligible", False):
+                fork_result = conversation_engine.check_and_generate_fork_questions(
+                    parent_field=field_spec,
+                    patient_answer=str(entry.get("value", "")),
+                    chief_complaint=self.record.chief_complaint.value if self.record.chief_complaint else "",
+                    language=self.language,
+                    doctor_custom_instructions=self.record.doctor_custom_instructions,
+                )
+                if fork_result:
+                    existing_ids = {f["id"] for f in schema["fields"]}
+                    for sub_field in fork_result:
+                        sub_id = sub_field["id"]
+                        if sub_id not in existing_ids:
+                            schema["fields"].append(sub_field)
+                            self.record.filled_state[sub_id] = {"value": None, "confidence": 0.0}
+                    logger.info(f"Fork triggered on '{fid}': injected {len(fork_result)} sub-fields")
+
+        # SAFETY CHECK: deterministic rules (never LLM-only)
+        safety_flags = check_safety(self.record.filled_state)
+        if safety_flags:
+            existing_ids = {f.rule_id for f in self.record.red_flags}
+            new_flags = [f for f in safety_flags if f.rule_id not in existing_ids]
+            if new_flags:
+                self.record.red_flags.extend(new_flags)
+                self.fsm.trigger_redflag()
+                self.record.macro_state = self.fsm.state
+                return self._build_ui_instruction(red_flags=new_flags), None
+
+        # COMPLETION
+        if field_selector.is_interview_complete(
+            schema, self.record.filled_state, self.record.interview_turn_count
+        ):
+            logger.info(f"Interview complete at turn {self.record.interview_turn_count}")
+            self.fsm.advance()  # -> DOCUMENT_SCAN
+            self.record.macro_state = self.fsm.state
+            return self._build_ui_instruction(), None
+
+        # NEXT FIELD (with loop guard)
+        next_field = self.select_next_field()
+        if next_field is None:
+            self.fsm.advance()
+            self.record.macro_state = self.fsm.state
+            return self._build_ui_instruction(), None
+        return None, next_field
+
+    # ──────────────────────────────────────────────────────────────────
+    # GEMINI LIVE HOOKS (Live fills the form; this engine stays in charge)
+    # ──────────────────────────────────────────────────────────────────
+
+    def open_fields(self, limit: int = 15) -> list[dict]:
+        schema = self.record.dynamic_schema or {"fields": []}
+        out = []
+        for f in schema.get("fields", []):
+            entry = self.record.filled_state.get(f["id"], {})
+            if not (isinstance(entry, dict) and entry.get("value")):
+                out.append({"field_id": f["id"], "about": f.get("question_intent", f["id"])})
+        return out[:limit]
+
+    def apply_live_answers(self, transcript: str, answers: list[dict]) -> dict:
+        """Apply answers Gemini Live extracted (tool call) for one patient utterance.
+
+        Only known, still-open field ids are accepted; duplicates/unknown ids are dropped.
+        Returns {"ui": dict} when leaving the question loop (red flag / complete), otherwise
+        {"next_field": dict, "attempt": int, "saved": [ids]}.
+        """
+        schema = self.record.dynamic_schema or {"fields": []}
+        valid = {f["id"] for f in schema.get("fields", [])}
+        self.record.add_conversation_message("patient", transcript or "", "DYNAMIC_INTERVIEW")
+        self.record.interview_turn_count += 1
+
+        extracted: dict = {}
+        for a in answers or []:
+            fid = str(a.get("field_id", "")).strip()
+            val = _normalize_answer(a.get("value", ""))
+            if not fid or not val or fid not in valid or fid in extracted:
+                continue
+            current = self.record.filled_state.get(fid, {})
+            if isinstance(current, dict) and current.get("value") and not current.get("unanswered"):
+                continue  # already answered — ignore repeats
+            try:
+                conf = float(a.get("confidence", 0.85))
+            except (TypeError, ValueError):
+                conf = 0.85
+            extracted[fid] = {"value": val, "verbatim": a.get("verbatim", ""), "confidence": conf}
+            self.record.update_filled_state(fid, val, conf)
+        if extracted:
+            logger.info(f"Live answers saved: {list(extracted)}")
+
+        ui, next_field = self._after_answers(extracted)
+        if ui is not None:
+            return {"ui": ui, "saved": list(extracted)}
+        attempt = self.note_asked(next_field["id"])
+        return {"next_field": next_field, "attempt": attempt, "saved": list(extracted)}
+
+    def live_field_ui(self, field: dict) -> dict:
+        """UI for the next field when Gemini Live will phrase the question (prompt filled in
+        after Live has spoken it, via live_question_ui)."""
+        result = conversation_engine.ConversationResult({
+            "spoken_text": "", "suggested_options": [], "extracted_fields": {},
+            "red_flag_check": None, "reasoning": "live", "current_category": field.get("category", "HPI"),
+        })
+        ui = self._build_dynamic_ui(result, field)
+        ui["live_ask"] = True
+        return ui
+
+    def field_by_id(self, field_id: str | None) -> dict | None:
+        schema = self.record.dynamic_schema or {"fields": []}
+        return next((f for f in schema.get("fields", []) if f["id"] == field_id), None)
+
+    def resume_or_current_ui(self) -> dict:
+        """Question for the current field written by the text engine (used when Live drops
+        mid-question). Does not count as a new ask."""
+        if self.fsm.state != "DYNAMIC_INTERVIEW":
+            return self.resume_session()
+        nf = self.select_next_field()
+        if nf is None:
+            return self._build_ui_instruction()
+        result = conversation_engine.generate_question(
+            target_field=nf,
+            filled_summary=self.record.get_filled_summary(),
+            conversation_history=self.record.conversation_history,
+            language=self.language,
+            chief_complaint=str(self.record.chief_complaint.value or "") if self.record.chief_complaint else "",
+            patient_age=self.record.patient_age,
+            patient_sex=self.record.patient_sex,
+            previous_history=self.record.previous_history,
+        )
+        self.record.add_conversation_message("assistant", result.spoken_text, nf.get("category", "HPI"))
+        return self._build_dynamic_ui(result, nf)
+
+    def live_question_ui(self, field: dict, spoken_text: str) -> dict:
+        """UI for a question Gemini Live just spoke (recorded in the transcript for the doctor)."""
+        self.record.add_conversation_message("assistant", spoken_text, field.get("category", "HPI"))
+        yes, no, unsure = _YES_NO.get(self.language, _YES_NO["en-IN"])
+        result = conversation_engine.ConversationResult({
+            "spoken_text": spoken_text,
+            "suggested_options": [
+                {"label": "Yes", "label_translated": yes},
+                {"label": "No", "label_translated": no},
+                {"label": "Not sure", "label_translated": unsure},
+            ],
+            "extracted_fields": {}, "red_flag_check": None, "reasoning": "live",
+            "current_category": field.get("category", "HPI"),
+        })
+        ui = self._build_dynamic_ui(result, field)
+        ui["current_field_id"] = field["id"]
+        return ui
 
     # ──────────────────────────────────────────────────────────────────
     # UI INSTRUCTION BUILDER
@@ -500,6 +682,7 @@ class DialogueManager:
             "progress": progress,
             "section_summary": self.record.get_filled_summary(),
             "conversation_history": self.record.conversation_history[-6:],
+            "current_field_id": current_field["id"] if current_field else None,
         }
 
     def _build_ui_instruction(
@@ -583,13 +766,16 @@ class DialogueManager:
 
         if state == "DYNAMIC_INTERVIEW":
             # Generate first question for the dynamic interview
-            schema = self.record.dynamic_schema or {"fields": []}
-            next_f = field_selector.next_field(schema, self.record.filled_state)
+            next_f = self.select_next_field()
 
             if next_f is None:
                 self.fsm.advance()
                 self.record.macro_state = self.fsm.state
                 return self._build_ui_instruction()
+
+            if self.live_mode:
+                self.note_asked(next_f["id"])
+                return self.live_field_ui(next_f)
 
             result = conversation_engine.generate_question(
                 target_field=next_f,
@@ -604,6 +790,7 @@ class DialogueManager:
             self.record.add_conversation_message(
                 "assistant", result.spoken_text, next_f.get("category", "HPI")
             )
+            self.note_asked(next_f["id"])
 
             return self._build_dynamic_ui(result, next_f)
 

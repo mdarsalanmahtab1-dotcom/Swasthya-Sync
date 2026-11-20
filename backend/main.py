@@ -20,6 +20,7 @@ import json
 import logging
 import time
 import asyncio
+import base64
 import sys
 
 if sys.platform == "win32":
@@ -487,6 +488,54 @@ async def text_to_speech_endpoint(
 # WebSocket — Real-time Conversation
 # ──────────────────────────────────────────────────────────────────────
 
+async def _after_engine_turn(dm: DialogueManager, prev_state: str):
+    """After every engine turn (text or Live): red-flag queue escalation + DB checkpoint."""
+    new_state = dm.fsm.state
+    # --- Gap A & Timing ---
+    # Check safety ALONE after interview completes
+    if prev_state == "DYNAMIC_INTERVIEW" and new_state == "DOCUMENT_SCAN":
+        import red_flag_library
+        flags = red_flag_library.check_safety(dm.record.filled_state)
+        if flags:
+            existing_ids = {f.rule_id for f in dm.record.red_flags}
+            new_flags = [f for f in flags if f.rule_id not in existing_ids]
+            if new_flags:
+                dm.record.red_flags.extend(new_flags)
+                reasons = "; ".join(f"{f.rule_id}: {f.description}" for f in new_flags)
+                escalate_queue_priority(dm.record.session_id, reasons)
+                
+    # PDF Generation fires on-demand via the GET endpoint in routes_extended.py
+
+    # Bridge: if red flags fired (from dialogue), escalate queue priority automatically
+    if dm.record.red_flags and dm.fsm.state == "EMERGENCY_PROTOCOL":
+        latest_flag = dm.record.red_flags[-1]
+        escalate_queue_priority(
+            dm.record.session_id,
+            f"{latest_flag.rule_id}: {latest_flag.description}"
+        )
+
+    # --- NEW: Safely save the session state to DB in the async loop ---
+    try:
+        import database
+        record_payload = {
+            "filled_state": dm.record.filled_state,
+            "document_extractions": [e.model_dump() for e in dm.record.document_extractions],
+            "red_flags": [r.model_dump() for r in dm.record.red_flags]
+        }
+        has_red_flags = len(dm.record.red_flags) > 0
+        checkpoint_status = "WAITING" if dm.fsm.state == "COMPLETE" else "IN_PROGRESS"
+        await database.commit_fsm_checkpoint(
+            session_id=dm.record.session_id,
+            filled_state=record_payload,
+            chief_complaint=str(dm.record.chief_complaint.value or "") if dm.record.chief_complaint else "",
+            interview_qa=dm.record.conversation_history,
+            priority_flag=has_red_flags,
+            status=checkpoint_status
+        )
+    except Exception as e:
+        logger.error(f"🚨 Checkpoint failed for session {dm.record.session_id} - {e}")
+
+
 @app.websocket("/ws/session")
 @app.websocket("/ws/intake")
 async def websocket_session(ws: WebSocket, session_id: str = Query(None)):
@@ -507,12 +556,19 @@ async def websocket_session(ws: WebSocket, session_id: str = Query(None)):
     """
     await ws.accept()
     dm: DialogueManager | None = None
+    live = None                      # LiveVoice for this connection (Gemini Live), if active
+    send_lock = asyncio.Lock()       # Live streams from a background task: serialise sends
+    dm_lock = asyncio.Lock()         # one engine operation at a time per session
+
+    async def send(obj: dict):
+        async with send_lock:
+            await ws.send_json(obj)
 
     if session_id and session_id in sessions:
         dm = sessions[session_id]
         logger.info(f"Rehydrated session: {session_id}")
         ui = dm.resume_session()
-        await ws.send_json({"type": "ui", **ui})
+        await send({"type": "ui", **ui})
 
     try:
         while True:
@@ -521,7 +577,7 @@ async def websocket_session(ws: WebSocket, session_id: str = Query(None)):
                 import json as _json
                 msg = _json.loads(raw)
             except _json.JSONDecodeError:
-                await ws.send_json({"type": "error", "message": "Invalid JSON"})
+                await send({"type": "error", "message": "Invalid JSON"})
                 continue
 
             msg_type = msg.get("type", "")
@@ -580,7 +636,7 @@ async def websocket_session(ws: WebSocket, session_id: str = Query(None)):
                 ui = dm.start_session()
                 sessions[dm.record.session_id] = dm
                 logger.info(f"Session started: {dm.record.session_id} | lang={language} | mode={clinic_mode} | patient_id={patient_id}")
-                await ws.send_json({"type": "ui", **ui})
+                await send({"type": "ui", **ui})
 
             elif msg_type == "resume":
                 provided_session_id = msg.get("session_id")
@@ -588,19 +644,28 @@ async def websocket_session(ws: WebSocket, session_id: str = Query(None)):
                     dm = sessions[provided_session_id]
                     logger.info(f"Session resumed: {dm.record.session_id}")
                     ui = dm.resume_session()
-                    await ws.send_json({"type": "ui", **ui})
+                    await send({"type": "ui", **ui})
                 else:
-                    await ws.send_json({"type": "error", "message": "Session not found or expired"})
+                    await send({"type": "error", "message": "Session not found or expired"})
 
             elif msg_type == "input":
                 if not dm:
-                    await ws.send_json({"type": "error", "message": "No active session"})
+                    await send({"type": "error", "message": "No active session"})
                     continue
                 input_type = msg.get("input_type", "tap")
                 value = msg.get("value", "")
 
+                # Live form-filling phase: taps/typed answers go through the same Live turn
+                if live and live.active and dm.fsm.state == "DYNAMIC_INTERVIEW" and input_type in ("tap", "voice"):
+                    await send({"type": "orb_state", "orb_state": "processing"})
+                    # Yes / No / Not sure buttons: applied directly to the current field
+                    if input_type == "tap" and value in ("Yes", "No", "Not sure") and await live.tap_answer(value):
+                        continue
+                    await live.text_answer(value)
+                    continue
+
                 # Send "processing" state to the frontend immediately
-                await ws.send_json({
+                await send({
                     "type": "orb_state",
                     "orb_state": "processing",
                 })
@@ -611,94 +676,99 @@ async def websocket_session(ws: WebSocket, session_id: str = Query(None)):
                 
                 # Run the dialogue manager in thread pool (it calls LLM synchronously)
                 loop = asyncio.get_event_loop()
-                ui = await loop.run_in_executor(
-                    None,
-                    dm.process_patient_input,
-                    input_type,
-                    value,
-                )
+                async with dm_lock:
+                    ui = await loop.run_in_executor(
+                        None,
+                        dm.process_patient_input,
+                        input_type,
+                        value,
+                    )
                 dm.record.macro_state = dm.fsm.state
 
                 new_state = dm.fsm.state if hasattr(dm, 'fsm') else ""
 
                 logger.info(f"State transition: {prev_state} -> {new_state} | session={dm.record.session_id}")
 
-                # --- Gap A & Timing ---
-                # Check safety ALONE after interview completes
-                if prev_state == "DYNAMIC_INTERVIEW" and new_state == "DOCUMENT_SCAN":
-                    import red_flag_library
-                    flags = red_flag_library.check_safety(dm.record.filled_state)
-                    if flags:
-                        existing_ids = {f.rule_id for f in dm.record.red_flags}
-                        new_flags = [f for f in flags if f.rule_id not in existing_ids]
-                        if new_flags:
-                            dm.record.red_flags.extend(new_flags)
-                            reasons = "; ".join(f"{f.rule_id}: {f.description}" for f in new_flags)
-                            escalate_queue_priority(dm.record.session_id, reasons)
-                            
-                # PDF Generation fires on-demand via the GET endpoint in routes_extended.py
-
-                # Bridge: if red flags fired (from dialogue), escalate queue priority automatically
-                if dm.record.red_flags and dm.fsm.state == "EMERGENCY_PROTOCOL":
-                    latest_flag = dm.record.red_flags[-1]
-                    escalate_queue_priority(
-                        dm.record.session_id,
-                        f"{latest_flag.rule_id}: {latest_flag.description}"
-                    )
-
-                # --- NEW: Safely save the session state to DB in the async loop ---
-                try:
-                    import database
-                    record_payload = {
-                        "filled_state": dm.record.filled_state,
-                        "document_extractions": [e.model_dump() for e in dm.record.document_extractions],
-                        "red_flags": [r.model_dump() for r in dm.record.red_flags]
-                    }
-                    has_red_flags = len(dm.record.red_flags) > 0
-                    checkpoint_status = "WAITING" if dm.fsm.state == "COMPLETE" else "IN_PROGRESS"
-                    await database.commit_fsm_checkpoint(
-                        session_id=dm.record.session_id,
-                        filled_state=record_payload,
-                        chief_complaint=str(dm.record.chief_complaint.value or "") if dm.record.chief_complaint else "",
-                        interview_qa=dm.record.conversation_history,
-                        priority_flag=has_red_flags,
-                        status=checkpoint_status
-                    )
-                except Exception as e:
-                    logger.error(f"🚨 Checkpoint failed for session {dm.record.session_id} - {e}")
+                await _after_engine_turn(dm, prev_state)
 
                 elapsed = time.time() - t0
                 logger.info(f"DialogueManager.process_patient_input took {elapsed:.2f}s | state={dm.fsm.state}")
 
-                await ws.send_json({"type": "ui", **ui})
+                if live and live.active:
+                    await live.speak_ui(ui)   # Live speaks the engine's question
+                else:
+                    await send({"type": "ui", **ui})
+
+            elif msg_type == "live_start":
+                if not dm:
+                    await send({"type": "live_status", "state": "fallback"})
+                    continue
+                if not (live and live.active):
+                    from live_voice import LiveVoice
+                    live = LiveVoice(dm, send, dm_lock, _after_engine_turn)
+                    ok = await live.start()
+                    await send({"type": "live_status", "state": "active" if ok else "fallback"})
+                    if ok and dm.fsm.state in ("CHIEF_COMPLAINT", "DYNAMIC_INTERVIEW"):
+                        last_q = next((m["content"] for m in reversed(dm.record.conversation_history)
+                                       if m.get("role") == "assistant"), "")
+                        if last_q:
+                            await live.say(last_q)
+                else:
+                    await send({"type": "live_status", "state": "active"})
+
+            elif msg_type == "audio_start":
+                if live:
+                    await live.audio_start()
+
+            elif msg_type == "audio":
+                if live:
+                    try:
+                        chunk = base64.b64decode(msg.get("data", ""))
+                    except Exception:
+                        chunk = b""
+                    if chunk:
+                        await live.audio_chunk(chunk)
+
+            elif msg_type == "audio_end":
+                if live:
+                    await live.audio_end()
+
+            elif msg_type == "live_stop":
+                if live:
+                    await live.close()
+                    live = None
 
             elif msg_type == "redflag":
                 if dm:
                     ui = dm.process_redflag()
-                    await ws.send_json({"type": "ui", **ui})
+                    await send({"type": "ui", **ui})
 
             elif msg_type == "clear_redflag":
                 if dm:
                     loop = asyncio.get_event_loop()
                     ui = await loop.run_in_executor(None, dm.clear_redflag)
-                    await ws.send_json({"type": "ui", **ui})
+                    await send({"type": "ui", **ui})
 
             elif msg_type == "get_record":
                 if dm:
-                    await ws.send_json({"type": "record", **dm.get_record()})
+                    await send({"type": "record", **dm.get_record()})
                 else:
-                    await ws.send_json({"type": "error", "message": "No active session"})
+                    await send({"type": "error", "message": "No active session"})
 
             else:
-                await ws.send_json({"type": "error", "message": f"Unknown type: {msg_type}"})
+                await send({"type": "error", "message": f"Unknown type: {msg_type}"})
 
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected")
+        if live:
+            await live.close()
         # Session intentionally left in memory for rehydration
     except Exception as e:
-        logger.error(f"WebSocket error: {e}", exc_info=True)
+        logger.error(f"WebSocket error: {type(e).__name__}")
+        if live:
+            await live.close()
         try:
-            await ws.send_json({"type": "error", "message": str(e)})
+            await send({"type": "error", "message": "Server error"})
         except Exception:
             pass
 
