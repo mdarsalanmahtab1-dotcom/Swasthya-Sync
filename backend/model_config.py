@@ -11,6 +11,7 @@ Env vars (comma-separated lists, first entry = primary, rest = fallbacks):
   GEMINI_VISION_MODELS      OCR of uploaded documents
   GEMINI_STT_MODEL          speech-to-text (Phase 2)
   GEMINI_TTS_MODEL          text-to-speech (Phase 2)
+  GEMINI_FAST_TIMEOUT / GEMINI_REASONING_TIMEOUT / GEMINI_SCHEMA_TIMEOUT   per-call limits (s)
 
 Auth (checked in this order):
   1. GEMINI_API_KEY set                -> Gemini Developer API with that key
@@ -42,6 +43,19 @@ REASONING_MODELS: list[str] = _env_list("GEMINI_REASONING_MODELS", "gemini-3.8-f
 VISION_MODELS: list[str] = _env_list("GEMINI_VISION_MODELS", "gemini-3.8-flash,gemini-3.5-flash-lite")
 STT_MODEL: str = os.environ.get("GEMINI_STT_MODEL", "").strip() or "gemini-3.5-transcribe"
 TTS_MODEL: str = os.environ.get("GEMINI_TTS_MODEL", "").strip() or "gemini-3.8-flash-lite-tts"
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+
+
+# Per-call time limits (seconds). Raise them on slow networks; each model in a cascade gets this long.
+FAST_TIMEOUT: float = _env_float("GEMINI_FAST_TIMEOUT", 12.0)            # per-turn extraction / questions
+REASONING_TIMEOUT: float = _env_float("GEMINI_REASONING_TIMEOUT", 20.0)  # summary, document entities
+SCHEMA_TIMEOUT: float = _env_float("GEMINI_SCHEMA_TIMEOUT", 25.0)        # one-time interview schema
 
 
 def all_configured_models() -> list[str]:

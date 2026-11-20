@@ -389,9 +389,11 @@ Generate your question about: {question_intent}"""
         result = llm_client.conversation_turn(system_prompt, user_prompt, temperature=0.4)
         elapsed = time.time() - t0
 
+        if result.get("is_fallback"):
+            result = {}  # don't show the generic "tell me more about your symptoms" text
         spoken_text = result.get("spoken_text", "")
         options = result.get("suggested_options", [])
-        reasoning = result.get("reasoning", "")
+        reasoning = result.get("reasoning", "") or "Fallback — AI unavailable"
 
         if not spoken_text:
             spoken_text = _fallback_question(question_intent, language_name)
@@ -512,10 +514,16 @@ Include 5-8 common complaint options like: Fever, Pain, Cough, Stomach problem, 
 
     try:
         result = llm_client.conversation_turn(system_prompt, user_prompt, temperature=0.3)
-        spoken = _fill_name_placeholder(result.get("spoken_text", "What brings you here today?"), patient_name)
+        if result.get("is_fallback") or not result.get("spoken_text"):
+            # AI unavailable: ask the chief-complaint question with complaint options (not Yes/No)
+            spoken = _fallback_opening(language)
+            options = _complaint_options(language)
+        else:
+            spoken = _fill_name_placeholder(result.get("spoken_text"), patient_name)
+            options = result.get("suggested_options") or _complaint_options(language)
         return ConversationResult({
             "spoken_text": spoken,
-            "suggested_options": result.get("suggested_options", _fallback_options(language_name)),
+            "suggested_options": options,
             "extracted_fields": {},
             "red_flag_check": None,
             "reasoning": "",
@@ -524,8 +532,8 @@ Include 5-8 common complaint options like: Fever, Pain, Cough, Stomach problem, 
     except Exception as e:
         logger.error(f"Opening question generation failed: {e}")
         return ConversationResult({
-            "spoken_text": "What brings you here today?",
-            "suggested_options": _fallback_options(language_name),
+            "spoken_text": _fallback_opening(language),
+            "suggested_options": _complaint_options(language),
             "extracted_fields": {},
             "red_flag_check": None,
             "reasoning": f"Fallback: {e}",
@@ -577,6 +585,37 @@ OUTPUT FORMAT — Return ONLY: {{"spoken_text": "your closing message"}}"""
 # ──────────────────────────────────────────────────────────────────────
 # FALLBACKS
 # ──────────────────────────────────────────────────────────────────────
+
+_OPENING_FALLBACK = {
+    "en-IN": "What brings you here today?",
+    "hi-IN": "आज आप किस समस्या के लिए आए हैं?",
+    "bn-IN": "আজ আপনি কী সমস্যা নিয়ে এসেছেন?",
+    "ta-IN": "இன்று நீங்கள் எந்த பிரச்சனைக்காக வந்துள்ளீர்கள்?",
+    "te-IN": "ఈరోజు మీరు ఏ సమస్యతో వచ్చారు?",
+    "kn-IN": "ಇಂದು ನೀವು ಯಾವ ಸಮಸ್ಯೆಗಾಗಿ ಬಂದಿದ್ದೀರಿ?",
+    "mr-IN": "आज आपण कोणत्या त्रासासाठी आला आहात?",
+    "gu-IN": "આજે તમે કઈ તકલીફ માટે આવ્યા છો?",
+    "ml-IN": "ഇന്ന് നിങ്ങൾ എന്ത് പ്രശ്നവുമായാണ് വന്നത്?",
+    "pa-IN": "ਅੱਜ ਤੁਸੀਂ ਕਿਸ ਸਮੱਸਿਆ ਲਈ ਆਏ ਹੋ?",
+    "or-IN": "ଆଜି ଆପଣ କେଉଁ ସମସ୍ୟା ପାଇଁ ଆସିଛନ୍ତି?",
+}
+
+_COMPLAINTS = ["Fever", "Pain", "Cough", "Stomach problem", "Weakness", "Skin issue",
+               "Breathing difficulty", "Something else"]
+_COMPLAINTS_T = {
+    "hi-IN": ["बुखार", "दर्द", "खांसी", "पेट की समस्या", "कमज़ोरी", "त्वचा की समस्या", "सांस लेने में तकलीफ", "कुछ और"],
+    "bn-IN": ["জ্বর", "ব্যথা", "কাশি", "পেটের সমস্যা", "দুর্বলতা", "ত্বকের সমস্যা", "শ্বাসকষ্ট", "অন্য কিছু"],
+}
+
+
+def _fallback_opening(language: str) -> str:
+    return _OPENING_FALLBACK.get(language, _OPENING_FALLBACK["en-IN"])
+
+
+def _complaint_options(language: str) -> list[dict]:
+    translated = _COMPLAINTS_T.get(language, _COMPLAINTS)
+    return [{"label": en, "label_translated": t} for en, t in zip(_COMPLAINTS, translated)]
+
 
 def _fallback_question(intent: str, language_name: str) -> str:
     return f"Can you tell me about: {intent}?"

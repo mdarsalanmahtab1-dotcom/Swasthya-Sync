@@ -50,10 +50,10 @@ FALLBACK_MODEL = FAST_MODELS_CASCADE[1] if len(FAST_MODELS_CASCADE) > 1 else FAS
 _llm_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="gemini_worker")
 
 
-def _call_model_with_timeout(fn, timeout_seconds: float = 7.0):
+def _call_model_with_timeout(fn, timeout_seconds: float | None = None):
     """Execute a synchronous SDK call with a strict timeout."""
     future = _llm_executor.submit(fn)
-    return future.result(timeout=timeout_seconds)
+    return future.result(timeout=timeout_seconds or model_config.FAST_TIMEOUT)
 
 # Complaint categories for classification
 COMPLAINT_CATEGORIES = [
@@ -157,7 +157,7 @@ def _generate_json_with_retry(
     user_prompt: str,
     temperature: float = 0.3,
     models_to_try: list[str] | None = None,
-    timeout_seconds: float = 7.0,
+    timeout_seconds: float | None = None,
     response_json_schema: dict | None = None,
     max_output_tokens: int = 1024,
 ) -> dict:
@@ -169,6 +169,7 @@ def _generate_json_with_retry(
         raise RuntimeError("Circuit breaker is OPEN — bypassing LLM call for immediate fallback")
 
     candidate_models = list(models_to_try or FAST_MODELS_CASCADE)
+    timeout_seconds = timeout_seconds or model_config.FAST_TIMEOUT
     last_exception = None
     use_schema = response_json_schema is not None and STRICT_JSON_SCHEMA
 
@@ -245,7 +246,7 @@ def generate_portal_chat_reply(system_prompt: str, user_prompt: str, temperature
                     config=config,
                 )
 
-            response = _call_model_with_timeout(_invoke, timeout_seconds=7.0)
+            response = _call_model_with_timeout(_invoke, timeout_seconds=model_config.FAST_TIMEOUT)
             elapsed = time.time() - t0
             logger.info(f"Portal chat reply took {elapsed:.2f}s (model={model})")
             circuit_breaker.record_success()
@@ -301,6 +302,7 @@ def _mock_conversation_turn(user_prompt: str) -> dict:
         "section_summary": "",
         "red_flag_check": None,
         "reasoning": "Fallback response — LLM circuit open or unavailable",
+        "is_fallback": True,  # callers replace the generic text with a context-appropriate one
     }
 
 
@@ -377,7 +379,7 @@ Only extract what is clearly present. Mark uncertain extractions."""
             f"Document type: {doc_type}\nOCR text:\n{ocr_text}",
             temperature=0.1,
             models_to_try=REASONING_MODELS_CASCADE,
-            timeout_seconds=10.0,
+            timeout_seconds=model_config.REASONING_TIMEOUT,
             response_json_schema=DOC_ENTITIES_JSON_SCHEMA,
         )
     except Exception as e:
@@ -490,7 +492,7 @@ Keep it objective and medically accurate."""
             user_prompt,
             temperature=0.2,
             models_to_try=REASONING_MODELS_CASCADE,
-            timeout_seconds=10.0,
+            timeout_seconds=model_config.REASONING_TIMEOUT,
             response_json_schema=CLINICAL_SUMMARY_JSON_SCHEMA,
         )
     except Exception as e:

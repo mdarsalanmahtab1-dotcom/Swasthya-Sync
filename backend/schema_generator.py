@@ -191,7 +191,7 @@ def generate_schema(
     # Try models in cascade order (high reasoning first, then fast fallbacks)
     schema = None
     for model in SCHEMA_MODELS_CASCADE:
-        schema = _call_model_for_schema(model, system_prompt, user_prompt, timeout_seconds=25.0)
+        schema = _call_model_for_schema(model, system_prompt, user_prompt, timeout_seconds=model_config.SCHEMA_TIMEOUT)
         if schema:
             break
         logger.warning(f"⚡ Schema model ({model}) failed or timed out — cascading to backup")
