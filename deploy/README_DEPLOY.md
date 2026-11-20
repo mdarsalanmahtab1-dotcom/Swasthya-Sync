@@ -3,6 +3,22 @@
 Backend → **Cloud Run** (`swasthyasync-api`, asia-south1). Frontend → **Firebase Hosting**.
 Secrets → **Secret Manager**. Files → **Cloud Storage** (private). DB → **AlloyDB** or Supabase Postgres via `DATABASE_URL`.
 
+## Fastest path: one script in Google Cloud Shell
+
+1. Make sure **billing is enabled** on your Google Cloud project, and on the project of your Gemini API key (the free tier's daily quota runs out).
+2. Open https://shell.cloud.google.com and run:
+   ```bash
+   git clone -b google-migration https://github.com/mdarsalanmahtab1-dotcom/Swasthya-Sync.git
+   cd Swasthya-Sync
+   bash deploy/cloudshell_deploy.sh YOUR_PROJECT_ID
+   ```
+3. It asks for the Gemini key, `DATABASE_URL` (Supabase pooler, port 6543), admin email/password and an optional Sarvam key. Input is hidden and stored only in Secret Manager.
+4. After about 10–15 minutes it prints the app URL (`https://YOUR_PROJECT_ID.web.app`) and the backend URL.
+
+Re-run the same command to redeploy after code changes. Don't redeploy while someone is mid-interview: sessions live in memory and a new revision drops them.
+
+The manual steps below do the same thing, one command at a time.
+
 Replace `PROJECT_ID` / `PROJECT_NUMBER` everywhere (`gcloud projects describe PROJECT_ID --format='value(projectNumber)'`).
 Every command below creates or changes billable resources, so run them yourself.
 
