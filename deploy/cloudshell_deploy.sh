@@ -72,13 +72,24 @@ gcloud storage buckets add-iam-policy-binding "gs://${BUCKET}" \
 echo "   bucket ready: gs://${BUCKET}"
 
 say "5/7 Building and deploying the backend to Cloud Run (5-10 min the first time)"
-# One warm instance + session affinity: interview sessions live in memory and use a WebSocket.
+# COST: by default the service scales to zero and CPU is billed only while handling requests
+# (an open interview WebSocket counts as a request), so idle time costs nothing.
+# First visit after idle takes ~15-30 s to wake up. For judging day run with KEEP_WARM=1
+# to keep one instance warm (billed 24x7 while on), then switch it off afterwards.
+# --max-instances 1 + --session-affinity: interview sessions live in memory (one instance).
 # --timeout 3600: WebSocket interviews can run for many minutes.
-# 2 CPU / 2 GiB: headless Chromium renders the PDF casesheet.
+# 1 CPU / 2 GiB: enough for headless Chromium (PDF casesheet).
+if [[ "${KEEP_WARM:-0}" == "1" ]]; then
+  SCALE_FLAGS="--min-instances 1 --no-cpu-throttling"
+  echo "   KEEP_WARM=1: one instance stays warm (billed continuously)"
+else
+  SCALE_FLAGS="--min-instances 0 --cpu-throttling"
+  echo "   cost-saving mode: scales to zero when idle"
+fi
 gcloud run deploy "$SERVICE" --source backend --region "$REGION" \
   --allow-unauthenticated --port 8080 \
-  --max-instances 1 --min-instances 1 --session-affinity --timeout 3600 \
-  --cpu 2 --memory 2Gi --no-cpu-throttling \
+  --max-instances 1 $SCALE_FLAGS --session-affinity --timeout 3600 \
+  --cpu 1 --memory 2Gi \
   --set-secrets "$SECRETS" \
   --set-env-vars "^@^CORS_ORIGINS=https://${PROJECT_ID}.web.app,https://${PROJECT_ID}.firebaseapp.com@GCS_BUCKET=${BUCKET}@ADMIN_EMAIL=${ADMIN_EMAIL}@OTP_PROVIDER=mock@VOICE_MODE=legacy@SPEECH_PROVIDER=google@STT_PROVIDER=sarvam" \
   --quiet
@@ -107,5 +118,6 @@ say "Done"
 echo "   Kiosk / web app : https://${PROJECT_ID}.web.app"
 echo "   Backend API     : ${API_URL}"
 echo "   Health check    : ${API_URL}/ready"
-echo "Note: the backend keeps 1 warm instance (needed for live interviews). After the event,"
-echo "scale it down to save money:  gcloud run services update ${SERVICE} --region ${REGION} --min-instances 0"
+echo "Cost: the backend scales to zero when idle (you pay only while it is used)."
+echo "  Keep warm for judging : gcloud run services update ${SERVICE} --region ${REGION} --min-instances 1 --no-cpu-throttling"
+echo "  Back to cheap mode    : gcloud run services update ${SERVICE} --region ${REGION} --min-instances 0 --cpu-throttling"
