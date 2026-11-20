@@ -1425,7 +1425,13 @@ async def process_batch_ocr(image_bytes_list: List[bytes], media_types: List[str
     parsed = None
     last_err = None
 
+    attempts = []
     for model_name in OCR_MODELS_CASCADE:
+        attempts += [model_name, model_name]  # one retry per model for "high demand" (503) errors
+    retried: set[str] = set()
+    for i, model_name in enumerate(attempts):
+        if i % 2 == 1 and model_name not in retried:
+            continue  # the retry slot is only used after a 503
         try:
             logger.info(f"Attempting batch OCR with model {model_name}...")
             call_coro = client.aio.models.generate_content(
@@ -1445,11 +1451,15 @@ async def process_batch_ocr(image_bytes_list: List[bytes], media_types: List[str
                 break
         except asyncio.TimeoutError:
             logger.warning(f"⚡ Batch OCR timed out on {model_name} ({model_config.VISION_TIMEOUT:.0f}s limit) — cascading to backup")
-            last_err = "Model timeout"
+            last_err = "timeout"
             continue
         except Exception as e:
-            last_err = str(e)
-            logger.warning(f"⚡ Batch OCR failed on {model_name}: {type(e).__name__} — cascading to backup")
+            code = getattr(e, "code", None) or getattr(e, "status_code", None)
+            last_err = "quota" if code == 429 else type(e).__name__
+            logger.warning(f"⚡ Batch OCR failed on {model_name}: {type(e).__name__} {code or ''} — cascading to backup")
+            if code in (500, 503) and model_name not in retried:
+                retried.add(model_name)
+                await asyncio.sleep(2)  # "high demand" usually clears within seconds
             continue
 
     if parsed:
@@ -1512,11 +1522,12 @@ async def process_batch_ocr(image_bytes_list: List[bytes], media_types: List[str
             logger.info(f"Batch OCR succeeded in {time.time()-start_time:.2f}s")
             return legacy_dict
 
-    logger.error(f"Batch OCR failed across all candidate models: {last_err}")
+    logger.error(f"Batch OCR failed across all candidate models ({last_err})")
     return {
         "doc_id": "error",
         "is_valid_medical_document": False,
-        "rejection_reason": f"OCR extraction temporarily unavailable ({last_err or 'all models failed'})",
+        # Patients never see raw API errors; details stay in the server log.
+        "rejection_reason": "We couldn't read the document right now. Please show it to the doctor during your visit.",
         "medications": [],
         "lab_values": [],
         "diagnoses": [],
