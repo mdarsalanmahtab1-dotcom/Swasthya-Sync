@@ -23,6 +23,10 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useTranslation } from '../hooks/useTranslation';
 import { ClinicalSummaryBadge } from '../components/ClinicalSummaryBadge';
 import { getMedicalOptionVisual } from '../utils/medicalIcons';
+
+// Option labels are shown as plain text: drop any emoji the model adds.
+const EMOJI_RE = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}]/gu;
+const stripEmoji = (s: string) => s.replace(EMOJI_RE, '').replace(/\s{2,}/g, ' ').trim();
 import { AyushChecklistModal, ALL_25_AYUSH_CHECKS, parseSummaryMap, getAyushCheckValue } from '../components/AyushChecklistModal';
 
 const LANGUAGE_DISPLAY: Record<string, { flag: string; name: string }> = {
@@ -135,7 +139,7 @@ export function Screen3_ConversationalIntake({
   // Track the last prompt to avoid re-speaking the same one
   const lastSpokenPromptRef = useRef<string>('');
 
-  // Indic word-by-word typing effect for Sarvam STT speech input
+  // Indic word-by-word typing effect for speech input
   const {
     isTyping: isTypingVoice,
     displayedText: displayedVoiceText,
@@ -182,7 +186,7 @@ export function Screen3_ConversationalIntake({
     ) {
       lastSpokenPromptRef.current = ui.prompt;
       const textToSpeak = ui.ack ? `${ui.ack}. ${ui.prompt}` : ui.prompt;
-      speak(textToSpeak, ui.language || 'hi-IN');
+      speak(textToSpeak, ui.language || 'hi-IN', 1, 'interview');
     }
   }, [ui.prompt, ui.ack, ui.voice, ui.language, isProcessing, speak, liveState]);
 
@@ -219,6 +223,23 @@ export function Screen3_ConversationalIntake({
     }
     stopRecording(e);
   }, [stopRecording, sendRaw]);
+
+  // Tap to start recording, tap again to send (no need to hold the button).
+  const micStartingRef = useRef(false);
+  const handleMicToggle = useCallback(async (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (micStartingRef.current) return;          // ignore taps while the mic is still opening
+    if (isRecording || liveRecording || liveMic.recording) {
+      handleMicRelease(e);
+      return;
+    }
+    micStartingRef.current = true;
+    try {
+      await handleMicPress(e);
+    } finally {
+      micStartingRef.current = false;
+    }
+  }, [isRecording, liveRecording, handleMicPress, handleMicRelease]);
 
   const handleOptionTap = useCallback((opt: { label: string; value?: string }) => {
     stopTTS();
@@ -395,7 +416,7 @@ export function Screen3_ConversationalIntake({
                   </span>
                   <div className="px-3.5 py-2.5 rounded-2xl rounded-tr-xs bg-amber-50 border border-amber-200 text-amber-900 text-xs sm:text-sm font-semibold flex items-center gap-2 shadow-card">
                     <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-600" />
-                    <span>Analyzing voice with Sarvam AI...</span>
+                    <span>Understanding your answer...</span>
                   </div>
                 </motion.div>
               )}
@@ -769,12 +790,12 @@ export function Screen3_ConversationalIntake({
             </div>
           )}
 
-          {/* Dynamic Option Cards with Medical Emojis */}
+          {/* Dynamic Option Cards */}
           {Array.isArray(ui.options) && ui.options.length > 0 && (
             <div className="flex flex-wrap justify-center gap-2 sm:gap-3 w-full max-w-4xl my-1 sm:my-2 px-1">
               {ui.options.map((opt, idx) => {
-                const label = typeof opt === 'string' ? opt : (opt.label || String(opt));
-                const labelTranslated = typeof opt === 'object' ? opt.label_translated : undefined;
+                const label = stripEmoji(typeof opt === 'string' ? opt : (opt.label || String(opt)));
+                const labelTranslated = typeof opt === 'object' && opt.label_translated ? stripEmoji(opt.label_translated) : undefined;
                 const visual = getMedicalOptionVisual(label, labelTranslated);
                 const hasSubtitle = Boolean(labelTranslated && labelTranslated !== label);
 
@@ -791,9 +812,6 @@ export function Screen3_ConversationalIntake({
                     disabled={isProcessing || anyRecording || isTranscribing || isTypingVoice}
                     className={`flex items-center gap-2.5 xs:gap-3.5 px-3.5 py-2.5 xs:px-5 xs:py-3 sm:px-6 sm:py-3.5 bg-white border-2 ${visual.badgeBorder} rounded-2xl hover:shadow-card-hover active:scale-[0.97] transition-[transform,box-shadow,border-color,background-color] duration-150 text-left shadow-card border-b-4 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer min-h-[50px] xs:min-h-[56px] min-w-[135px] xs:min-w-[160px] sm:min-w-[210px] flex-1 max-w-[340px]`}
                   >
-                    <span className="text-xl xs:text-2xl sm:text-3xl shrink-0 select-none leading-none">
-                      {visual.emoji}
-                    </span>
                     <div className="min-w-0 flex-1">
                       <span className="block text-xs xs:text-sm sm:text-base font-extrabold text-slate-800 leading-snug whitespace-normal break-words">
                         {labelTranslated || label}
@@ -859,14 +877,14 @@ export function Screen3_ConversationalIntake({
                 id="btn-tts-toggle"
                 type="button"
                 aria-label={isSpeaking ? 'Stop speaking' : 'Replay prompt'}
-                onClick={() => isSpeaking ? stopTTS() : speak(ui.prompt || '', ui.language || 'hi-IN')}
+                onClick={() => isSpeaking ? stopTTS() : speak(ui.prompt || '', ui.language || 'hi-IN', 1, 'interview')}
                 title={isSpeaking ? 'Stop speaking' : 'Replay prompt'}
                 className="p-2 xs:p-2.5 rounded-full text-slate-600 bg-white border border-slate-200 hover:text-blue-600 hover:border-blue-300 hover:bg-blue-50/70 transition-[border-color,background-color,color,transform] duration-150 active:scale-[0.97] shrink-0 cursor-pointer shadow-card"
               >
                 {isSpeaking ? <VolumeX className="w-3.5 h-3.5 xs:w-4 xs:h-4 sm:w-5 sm:h-5 text-red-500" /> : <Volume2 className="w-3.5 h-3.5 xs:w-4 xs:h-4 sm:w-5 sm:h-5" />}
               </LiquidButton>
 
-              {/* Hold to Speak Button */}
+              {/* Tap to Speak Button (tap again to send) */}
               <div className="relative">
                 <div
                   className="absolute inset-0 rounded-full bg-blue-500 transition-opacity duration-75"
@@ -879,12 +897,9 @@ export function Screen3_ConversationalIntake({
                 <LiquidButton
                   id="btn-mic"
                   type="button"
-                  onMouseDown={handleMicPress}
-                  onMouseUp={handleMicRelease}
-                  onTouchStart={handleMicPress}
-                  onTouchEnd={handleMicRelease}
-                  onTouchCancel={handleMicRelease}
-                  disabled={isProcessing || isTranscribing || isTypingVoice}
+                  onClick={handleMicToggle}
+                  aria-pressed={anyRecording}
+                  disabled={!anyRecording && (isProcessing || isTranscribing || isTypingVoice)}
                   className={`relative flex items-center justify-center gap-1.5 xs:gap-2 px-3.5 xs:px-5 sm:px-8 py-2 xs:py-2.5 sm:py-3 rounded-full font-extrabold text-white transition-[transform,box-shadow,background-color] duration-150 active:scale-[0.97] shadow-card-hover text-xs sm:text-base ${
                     anyRecording
                       ? 'bg-red-600 shadow-red-600/40 scale-102 animate-pulse'

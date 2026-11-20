@@ -30,7 +30,9 @@ import io
 import logging
 import os
 import re
+import threading
 import time
+from collections import OrderedDict
 import wave
 
 from dotenv import load_dotenv
@@ -320,22 +322,85 @@ _BRAND_SPOKEN = {
 _BRAND_RE = re.compile(r"swasth?ya[\s\-]?sync|स्वास्थ्यसिंक", re.IGNORECASE)
 
 
+#   Capital-letter acronyms in an Indic sentence are also read oddly; say them in that script.
+_ACRONYMS_SPOKEN = {
+    "hi-IN": {"ABHA": "आभा", "OTP": "ओटीपी", "ID": "आईडी", "BP": "बीपी", "PDF": "पीडीएफ़"},
+    "mr-IN": {"ABHA": "आभा", "OTP": "ओटीपी", "ID": "आयडी", "BP": "बीपी"},
+    "bn-IN": {"ABHA": "আভা", "OTP": "ওটিপি", "ID": "আইডি", "BP": "বিপি", "PDF": "পিডিএফ"},
+}
+_ACRONYM_RE = re.compile(r"\b(ABHA|OTP|ID|BP|PDF)\b")
+
+
 def pronounceable(text: str, language_code: str) -> str:
-    """Rewrite words TTS voices tend to spell out (currently the brand name)."""
-    return _BRAND_RE.sub(_BRAND_SPOKEN.get(language_code, "Swasthya Sync"), text or "")
+    """Rewrite words TTS voices tend to spell out (brand name, common acronyms)."""
+    out = _BRAND_RE.sub(_BRAND_SPOKEN.get(language_code, "Swasthya Sync"), text or "")
+    spoken = _ACRONYMS_SPOKEN.get(language_code)
+    if spoken:
+        out = _ACRONYM_RE.sub(lambda m: spoken.get(m.group(1), m.group(1)), out)
+    return out
 
 
-def text_to_speech(text: str, language_code: str = "hi-IN", speaker: str | None = None) -> bytes:
+# Small in-memory cache: the kiosk's guide prompts (welcome, consent, OTP…) are identical for
+# every patient, so each is synthesised once instead of costing a TTS request every time.
+_TTS_CACHE: "OrderedDict[tuple, bytes]" = OrderedDict()
+_TTS_CACHE_MAX = int(os.environ.get("TTS_CACHE_SIZE", "300"))
+_TTS_CACHE_LOCK = threading.Lock()
+
+
+# Interview questions can use a different voice provider from the kiosk's guide prompts.
+# INTERVIEW_TTS_PROVIDER=sarvam (default when SARVAM_API_KEY is set) -> Sarvam Bulbul first,
+# Gemini TTS as backup. Guide prompts keep SPEECH_PROVIDER (Gemini by default).
+INTERVIEW_TTS_PROVIDER = (os.environ.get("INTERVIEW_TTS_PROVIDER", "sarvam") or "sarvam").strip().lower()
+
+
+def text_to_speech(text: str, language_code: str = "hi-IN", speaker: str | None = None,
+                   purpose: str = "") -> bytes:
     if not (text or "").strip():
         return b""
     text = pronounceable(text, language_code)
-    if SPEECH_PROVIDER == "sarvam":
-        return SarvamSpeechProvider().text_to_speech(text, language_code, speaker)
+    provider = SPEECH_PROVIDER
+    if purpose == "interview" and INTERVIEW_TTS_PROVIDER == "sarvam" and _sarvam_available():
+        provider = "sarvam"
+    key = (text, language_code, speaker or "", provider)
+    with _TTS_CACHE_LOCK:
+        hit = _TTS_CACHE.get(key)
+        if hit:
+            _TTS_CACHE.move_to_end(key)
+    if hit:
+        logger.info(f"TTS cache hit ({len(text)} chars lang={language_code})")
+        return hit
+    audio = _text_to_speech_uncached(text, language_code, speaker, provider,
+                                     sarvam_backup=(purpose == "interview"))
+    if audio:
+        with _TTS_CACHE_LOCK:
+            _TTS_CACHE[key] = audio
+            while len(_TTS_CACHE) > _TTS_CACHE_MAX:
+                _TTS_CACHE.popitem(last=False)
+    return audio
+
+
+def _text_to_speech_uncached(text: str, language_code: str, speaker: str | None,
+                             provider: str = SPEECH_PROVIDER, sarvam_backup: bool = True) -> bytes:
+    if provider == "sarvam":
+        audio = SarvamSpeechProvider().text_to_speech(text, language_code, speaker)
+        if audio:
+            return audio
+        logger.warning("Sarvam TTS gave no audio — falling back to Gemini TTS")
+        try:
+            return GoogleSpeechProvider().text_to_speech(text, language_code, speaker)
+        except Exception as e:
+            logger.error(f"Gemini TTS backup failed ({type(e).__name__})")
+            return b""
     try:
         return GoogleSpeechProvider().text_to_speech(text, language_code, speaker)
     except Exception as e:
-        logger.error(f"Google TTS failed ({type(e).__name__})")
-        if _sarvam_available():
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status == 429:
+            logger.error("Google TTS failed: 429 quota exceeded — the Gemini key's TTS limit is used up "
+                         "(Free Tier allows ~10/day). Use a billing-enabled key. Browser voice will be used.")
+        else:
+            logger.error(f"Google TTS failed ({type(e).__name__}{f' {status}' if status else ''})")
+        if sarvam_backup and _sarvam_available():   # Sarvam is reserved for the interview
             logger.info("Falling back to Sarvam TTS")
             try:
                 return SarvamSpeechProvider().text_to_speech(text, language_code, speaker)

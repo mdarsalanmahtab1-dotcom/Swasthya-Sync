@@ -34,6 +34,7 @@ interface UseSarvamSTTReturn {
 
 const BACKEND_URL = getApiBaseUrl();
 const MIN_RECORDING_MS = 500; // Don't send audio shorter than this
+const MAX_RECORDING_MS = 45000; // Auto-send after 45 s
 
 export function useSarvamSTT(
   hintLanguage: string = 'hi-IN',
@@ -187,6 +188,11 @@ export function useSarvamSTT(
 
       recorder.start(200); // Collect chunks every 200ms
       setIsRecording(true);
+      // Tap-to-record: if the patient forgets to tap again, send automatically before the
+      // server's 60 s / 2 MB limit.
+      setTimeout(() => {
+        if (mediaRecorderRef.current === recorder && recorder.state === 'recording') recorder.stop();
+      }, MAX_RECORDING_MS);
       console.log('[STT] Recording started');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Microphone access denied';

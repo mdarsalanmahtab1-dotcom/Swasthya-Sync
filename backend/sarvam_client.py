@@ -263,7 +263,7 @@ def text_to_speech(
                     "enable_preprocessing": True,
                     "model": "bulbul:v3",
                 },
-                timeout=httpx.Timeout(connect=3.0, read=4.5, write=4.0, pool=3.0),
+                timeout=httpx.Timeout(connect=3.0, read=10.0, write=4.0, pool=3.0),
             )
             response.raise_for_status()
             data = response.json()
@@ -276,8 +276,19 @@ def text_to_speech(
 
         elapsed = time.time() - t0
         logger.info(f"Sarvam TTS took {elapsed:.2f}s | {len(all_audio)} chunk(s) | lang={language_code}")
-        if all_audio and all_audio[0]:
+        all_audio = [a for a in all_audio if a]
+        if len(all_audio) == 1:
             return all_audio[0]
+        if all_audio:  # several chunks: join the WAVs (previously only the first chunk was played)
+            import io as _io, wave as _wave
+            out = _io.BytesIO()
+            with _wave.open(out, "wb") as w_out:
+                for i, a in enumerate(all_audio):
+                    with _wave.open(_io.BytesIO(a)) as w_in:
+                        if i == 0:
+                            w_out.setparams(w_in.getparams())
+                        w_out.writeframes(w_in.readframes(w_in.getnframes()))
+            return out.getvalue()
 
         logger.warning("Sarvam TTS returned empty audio — falling back to Google TTS")
         return b""

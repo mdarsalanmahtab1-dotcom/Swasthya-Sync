@@ -10,6 +10,8 @@ import {
   Stethoscope, Scan, Languages
 } from 'lucide-react';
 import { getApiBaseUrl } from '../config';
+import { guideAudioUrl } from '../utils/guideAudio';
+import { speakableText } from '../hooks/useSarvamTTS';
 import { OtpInput } from '../components/OtpInput';
 import { toast } from '../components/Toast';
 import { useResendCooldown } from '../hooks/useResendCooldown';
@@ -357,11 +359,14 @@ export function Login({ onSessionStarted }: Props) {
       formData.append('text', item.welcomePrompt);
       formData.append('language', item.ttsLang);
 
-      const resp = await fetch(`${getApiBaseUrl()}/api/tts`, {
-        method: 'POST',
-        body: formData,
-        signal: abortController.signal,
-      });
+      const staticUrl = await guideAudioUrl(item.ttsLang, 'language_welcome', item.welcomePrompt);
+      const resp = staticUrl
+        ? await fetch(staticUrl, { signal: abortController.signal })
+        : await fetch(`${getApiBaseUrl()}/api/tts`, {
+            method: 'POST',
+            body: formData,
+            signal: abortController.signal,
+          });
 
       if (resp.ok) {
         const blob = await resp.blob();
@@ -402,7 +407,7 @@ export function Login({ onSessionStarted }: Props) {
     if ('speechSynthesis' in window) {
       try {
         window.speechSynthesis.cancel();
-        const utt = new SpeechSynthesisUtterance(item.welcomePrompt);
+        const utt = new SpeechSynthesisUtterance(speakableText(item.welcomePrompt, item.ttsLang));
         utt.lang = item.ttsLang;
         utt.rate = 0.95;
         const voices = window.speechSynthesis.getVoices();
@@ -479,11 +484,15 @@ export function Login({ onSessionStarted }: Props) {
         formData.append('text', item.welcomePrompt);
         formData.append('language', item.ttsLang);
 
-        fetch(`${getApiBaseUrl()}/api/tts`, {
-          method: 'POST',
-          body: formData,
-          signal: abortController.signal,
-        })
+        // Pre-recorded welcome (no API call on every loop); live TTS only if the file is missing.
+        guideAudioUrl(item.ttsLang, 'language_welcome', item.welcomePrompt)
+          .then((staticUrl) => staticUrl
+            ? fetch(staticUrl, { signal: abortController.signal })
+            : fetch(`${getApiBaseUrl()}/api/tts`, {
+                method: 'POST',
+                body: formData,
+                signal: abortController.signal,
+              }))
           .then(async (resp) => {
             if (!resp.ok) throw new Error('TTS error');
             const blob = await resp.blob();
@@ -519,7 +528,7 @@ export function Login({ onSessionStarted }: Props) {
             if ('speechSynthesis' in window) {
               try {
                 window.speechSynthesis.cancel();
-                const utt = new SpeechSynthesisUtterance(item.welcomePrompt);
+                const utt = new SpeechSynthesisUtterance(speakableText(item.welcomePrompt, item.ttsLang));
                 utt.lang = item.ttsLang;
                 utt.rate = 0.95;
                 const voices = window.speechSynthesis.getVoices();
@@ -1111,7 +1120,7 @@ export function Login({ onSessionStarted }: Props) {
                   </div>
                   <div className="flex items-center gap-1.5 text-slate-600">
                     <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                    <span>Sarvam AI Speech</span>
+                    <span>Gemini voice in Indian languages</span>
                   </div>
                 </div>
               </div>

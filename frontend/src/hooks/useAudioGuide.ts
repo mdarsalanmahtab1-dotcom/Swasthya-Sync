@@ -3,6 +3,7 @@ import { audioTranslations } from '../utils/audioTranslations';
 import type { TranslationKey, SupportedLanguage } from '../utils/audioTranslations';
 import { useAudioGuideContext } from '../context/AudioGuideContext';
 import { useSarvamTTS } from './useSarvamTTS';
+import { guideAudioUrl } from '../utils/guideAudio';
 
 const TTS_LANG_MAP: Record<string, string> = {
   'en': 'en-IN',
@@ -84,7 +85,11 @@ export function useAudioGuide() {
         });
       }
 
-      sarvamSpeak(textToSpeak, ttsLang, loopCount).catch(console.error);
+      // Fixed prompts play a pre-recorded file (no API call); others use live TTS.
+      const finalText = textToSpeak;
+      guideAudioUrl(ttsLang, key, finalText)
+        .then((url) => sarvamSpeak(finalText, ttsLang, loopCount, 'guide', url || undefined))
+        .catch(console.error);
     },
     [isMuted, uiLang, language, sarvamSpeak]
   );

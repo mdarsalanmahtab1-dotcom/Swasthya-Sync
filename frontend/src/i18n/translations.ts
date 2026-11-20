@@ -133,8 +133,8 @@ export const translations: Record<UILanguage, Record<string, string>> = {
     "interview.simulate_alert": "Simulate Alert",
     "interview.processing": "Processing...",
     "interview.type_response": "Tap here to type your response...",
-    "interview.release_to_send": "Release to Send",
-    "interview.hold_to_speak": "Hold to Speak",
+    "interview.release_to_send": "Tap to Send",
+    "interview.hold_to_speak": "Tap to Speak",
     "interview.you": "You (Patient)",
     "interview.ai_doctor": "Swasthya AI",
 
@@ -326,8 +326,8 @@ export const translations: Record<UILanguage, Record<string, string>> = {
     "interview.simulate_alert": "अलर्ट अनुकरण",
     "interview.processing": "प्रोसेसिंग...",
     "interview.type_response": "अपना उत्तर टाइप करने के लिए यहाँ टैप करें...",
-    "interview.release_to_send": "भेजने के लिए छोड़ें",
-    "interview.hold_to_speak": "बोलने के लिए दबाए रखें",
+    "interview.release_to_send": "भेजने के लिए फिर टैप करें",
+    "interview.hold_to_speak": "बोलने के लिए टैप करें",
     "interview.you": "आप (मरीज़)",
     "interview.ai_doctor": "स्वास्थ्य AI",
 
@@ -519,8 +519,8 @@ export const translations: Record<UILanguage, Record<string, string>> = {
     "interview.simulate_alert": "অ্যালার্ট অনুকরণ",
     "interview.processing": "প্রক্রিয়াকরণ হচ্ছে...",
     "interview.type_response": "আপনার উত্তর টাইপ করতে এখানে আলতো চাপুন...",
-    "interview.release_to_send": "পাঠানোর জন্য ছেড়ে দিন",
-    "interview.hold_to_speak": "কথা বলার জন্য ধরে রাখুন",
+    "interview.release_to_send": "পাঠাতে আবার ট্যাপ করুন",
+    "interview.hold_to_speak": "কথা বলতে ট্যাপ করুন",
     "interview.you": "আপনি (রোগী)",
     "interview.ai_doctor": "স্বাস্থ্য AI",
 

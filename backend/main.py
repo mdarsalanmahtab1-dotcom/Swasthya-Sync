@@ -457,6 +457,7 @@ async def text_to_speech_endpoint(
     text: str = Form(...),
     language: str = Form("hi-IN"),
     speaker: str = Form(""),
+    purpose: str = Form(""),
 ):
     """
     Convert text to speech (Gemini TTS by default; SPEECH_PROVIDER=sarvam optional).
@@ -473,6 +474,7 @@ async def text_to_speech_endpoint(
         text,
         language,
         speaker if speaker else None,
+        "interview" if purpose == "interview" else "",
     )
 
     elapsed = time.time() - t0
