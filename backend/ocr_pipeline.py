@@ -32,6 +32,11 @@ OCR_MODELS_CASCADE = model_config.VISION_MODELS
 # (match_patient_name below). Set OCR_NAME_MATCH_MODE=llm to restore model-side matching.
 OCR_NAME_MATCH_MODE = (os.environ.get("OCR_NAME_MATCH_MODE", "python") or "python").strip().lower()
 
+# What to do when the name on a document differs from the registered patient:
+#   warn (default) -> accept the document, store name_match=false as a warning for the doctor
+#   reject         -> refuse the upload
+OCR_NAME_CHECK = (os.environ.get("OCR_NAME_CHECK", "warn") or "warn").strip().lower()
+
 _WITHHELD_NAME = "[WITHHELD FOR PRIVACY]"
 _PRIVACY_OVERRIDE = """PRIVACY OVERRIDE (takes precedence over every rule below):
 The registered patient name is WITHHELD and shown as [WITHHELD FOR PRIVACY].
@@ -1469,8 +1474,12 @@ async def process_batch_ocr(image_bytes_list: List[bytes], media_types: List[str
             rejection_reason = parsed.rejection_reason
             if OCR_NAME_MATCH_MODE != "llm":
                 name_match = match_patient_name(patient_name, parsed.extracted_name_on_document)
-                if name_match is False and parsed.is_valid_medical_document:
+                if name_match is False and parsed.is_valid_medical_document and OCR_NAME_CHECK == "reject":
                     rejection_reason = "patient name clearly conflicts with the registered patient name"
+            if name_match is False and OCR_NAME_CHECK != "reject":
+                # Default: accept the document, keep a warning for the doctor instead of blocking
+                rejection_reason = None
+                logger.info("OCR: name on document differs from registered name — accepted with warning")
 
             legacy_dict = {
                 "doc_id": str(uuid.uuid4())[:8],

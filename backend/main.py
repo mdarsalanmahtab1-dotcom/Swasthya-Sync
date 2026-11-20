@@ -323,7 +323,9 @@ async def upload_document_batch(
     from ocr_pipeline import process_batch_ocr
     result = await process_batch_ocr(image_bytes_list, media_types, patient_name)
     
-    if not result.get("is_valid_medical_document") or result.get("name_match") is False:
+    from ocr_pipeline import OCR_NAME_CHECK
+    name_blocked = OCR_NAME_CHECK == "reject" and result.get("name_match") is False
+    if not result.get("is_valid_medical_document") or name_blocked:
         return {"status": "rejected", "reason": result.get("rejection_reason", "Document rejected due to patient name mismatch or invalid format.")}
         
     logger.info(f"batch upload received session_id: {session_id}, in sessions? {session_id in sessions}")
