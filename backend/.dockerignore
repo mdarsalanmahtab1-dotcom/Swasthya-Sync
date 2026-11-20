@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+.venv/
+venv/
+uploads/
+generated_pdfs/
+static/prescriptions/
+test_files/
+test_*.py
+verify_*.py
+*.pdf
+!ayush_sample_casesheet.pdf
+*.ogg
+*.db

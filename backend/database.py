@@ -19,9 +19,10 @@ _pool = None
 
 async def init_db_pool():
     global _pool
-    db_url = os.getenv("SUPABASE_DB_URL")
+    # DATABASE_URL (AlloyDB / any Postgres) first; SUPABASE_DB_URL kept for backward compatibility.
+    db_url = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
     if not db_url:
-        logger.error("SUPABASE_DB_URL is missing. DB won't work.")
+        logger.error("DATABASE_URL (or SUPABASE_DB_URL) is missing. DB won't work.")
         return
     _pool = await asyncpg.create_pool(
         db_url,

@@ -116,10 +116,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow the Vite dev server
+# CORS — only the origins in CORS_ORIGINS (comma-separated). Production: the Firebase Hosting URLs.
+CORS_ORIGINS = [o.strip() for o in os.environ.get(
+    "CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -143,6 +145,20 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 async def health_check():
     """Deployment health probe endpoint."""
     return {"status": "healthy", "service": "SwasthyaSync API", "version": "2.0.0"}
+
+
+@app.get("/ready")
+async def readiness_check():
+    """Readiness probe: checks the database pool with a cheap query."""
+    import database
+    if not database._pool:
+        return JSONResponse(status_code=503, content={"status": "not_ready", "db": "no pool"})
+    try:
+        async with database._pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+        return {"status": "ready", "db": "ok"}
+    except Exception as e:
+        return JSONResponse(status_code=503, content={"status": "not_ready", "db": type(e).__name__})
 
 @app.post("/api/session")
 async def create_session(

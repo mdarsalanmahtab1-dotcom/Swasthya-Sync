@@ -2,10 +2,13 @@
  * SwasthyaSync — Environment & API Configuration
  *
  * Dynamically resolves backend HTTP and WebSocket URLs based on current host/IP.
- * Works seamlessly on localhost, local network IPs (e.g. 103.x, 192.168.x), Vercel, and cloud deployments.
+ * Production (Firebase Hosting) REQUIRES VITE_API_URL (the Cloud Run URL); the WS URL is
+ * VITE_WS_URL or derived from VITE_API_URL. Localhost and LAN testing work without env vars.
  */
 
-const FALLBACK_PROD_BACKEND = 'https://swasthyasync-production-7a69c221.up.railway.app';
+function missingProdBackend(): never {
+  throw new Error('VITE_API_URL is not set for this production build (set it in frontend/.env.production).');
+}
 
 export function getApiBaseUrl(): string {
   if (import.meta.env.VITE_API_URL) {
@@ -24,9 +27,9 @@ export function getApiBaseUrl(): string {
       return `${protocol}//localhost:8000`;
     }
 
-    // Any production or preview deployment (Vercel, Railway, Render, custom domains)
-    if (import.meta.env.PROD || hostname.includes('vercel.app') || hostname.includes('railway.app') || hostname.includes('onrender.com')) {
-      return FALLBACK_PROD_BACKEND;
+    // Production builds must point at the backend explicitly via VITE_API_URL
+    if (import.meta.env.PROD) {
+      missingProdBackend();
     }
 
     // LAN / local network testing (e.g. phone accessing laptop on 192.168.x.x)
@@ -58,10 +61,9 @@ export function getWsUrl(): string {
       return 'ws://localhost:8000/ws/session';
     }
 
-    // Any production or preview deployment (Vercel, Railway, Render, custom domains)
-    if (import.meta.env.PROD || hostname.includes('vercel.app') || hostname.includes('railway.app') || hostname.includes('onrender.com')) {
-      const prodWs = FALLBACK_PROD_BACKEND.replace('https://', 'wss://').replace('http://', 'ws://');
-      return `${prodWs}/ws/session`;
+    // Production builds must point at the backend explicitly via VITE_API_URL / VITE_WS_URL
+    if (import.meta.env.PROD) {
+      missingProdBackend();
     }
 
     // Local network testing
