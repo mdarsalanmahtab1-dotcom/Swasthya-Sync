@@ -40,7 +40,7 @@ def _env_list(name: str, default: str) -> list[str]:
 
 FAST_MODELS: list[str] = _env_list("GEMINI_FAST_MODELS", "gemini-3.5-flash-lite,gemini-flash-lite-latest")
 REASONING_MODELS: list[str] = _env_list("GEMINI_REASONING_MODELS", "gemini-3.5-flash-lite,gemini-3.8-flash")
-VISION_MODELS: list[str] = _env_list("GEMINI_VISION_MODELS", "gemini-3.8-flash,gemini-3.5-flash-lite")
+VISION_MODELS: list[str] = _env_list("GEMINI_VISION_MODELS", "gemini-3.5-flash-lite,gemini-3.8-flash")
 STT_MODEL: str = os.environ.get("GEMINI_STT_MODEL", "").strip() or "gemini-3.5-transcribe"
 TTS_MODEL: str = os.environ.get("GEMINI_TTS_MODEL", "").strip() or "gemini-3.8-flash-lite-tts"
 
@@ -63,6 +63,7 @@ LIVE_VOICE: str = os.environ.get("GEMINI_LIVE_VOICE", "").strip() or "Kore"
 FAST_TIMEOUT: float = _env_float("GEMINI_FAST_TIMEOUT", 12.0)            # per-turn extraction / questions
 REASONING_TIMEOUT: float = _env_float("GEMINI_REASONING_TIMEOUT", 20.0)  # summary, document entities
 SCHEMA_TIMEOUT: float = _env_float("GEMINI_SCHEMA_TIMEOUT", 25.0)        # one-time interview schema
+VISION_TIMEOUT: float = _env_float("GEMINI_VISION_TIMEOUT", 45.0)        # document OCR, per model
 LIVE_TIMEOUT: float = _env_float("GEMINI_LIVE_TIMEOUT", 20.0)            # Live: max wait for a reply
 
 

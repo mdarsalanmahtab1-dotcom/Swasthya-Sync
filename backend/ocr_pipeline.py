@@ -1290,6 +1290,34 @@ class BatchExtractionResponse(BaseModel):
     consolidated_summary: ConsolidatedSummary
 
 # ------------------------------------------------------------------
+# Image downscaling: phone photos are several MB; 1600 px keeps text readable
+# ------------------------------------------------------------------
+_MAX_SIDE = 1600
+
+
+def _shrink_image(data: bytes, mime: str) -> tuple[bytes, str]:
+    """Resize large photos to max 1600 px (JPEG q85) before sending them to the model.
+    PDFs and anything Pillow can't open are sent unchanged."""
+    if not (mime or "").startswith("image/"):
+        return data, mime
+    try:
+        from PIL import Image, ImageOps
+        img = Image.open(io.BytesIO(data))
+        img = ImageOps.exif_transpose(img)  # respect phone rotation
+        if max(img.size) > _MAX_SIDE:
+            img.thumbnail((_MAX_SIDE, _MAX_SIDE))
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=85, optimize=True)
+        small = out.getvalue()
+        return (small, "image/jpeg") if len(small) < len(data) else (data, mime)
+    except Exception as e:
+        logger.warning(f"Image shrink skipped ({type(e).__name__})")
+        return data, mime
+
+
+# ------------------------------------------------------------------
 # Name matching in Python (so the registered name never reaches the model)
 # ------------------------------------------------------------------
 import re as _re
@@ -1382,9 +1410,14 @@ async def process_batch_ocr(image_bytes_list: List[bytes], media_types: List[str
         system_prompt = _PRIVACY_OVERRIDE + SYSTEM_PROMPT_TEMPLATE.format(patient_name=_WITHHELD_NAME)
 
     contents = []
+    total_in, total_out = 0, 0
     for img_bytes, mtype in zip(image_bytes_list, media_types):
-        contents.append(types.Part.from_bytes(data=img_bytes, mime_type=mtype))
-    
+        small, small_type = _shrink_image(img_bytes, mtype)
+        total_in += len(img_bytes)
+        total_out += len(small)
+        contents.append(types.Part.from_bytes(data=small, mime_type=small_type))
+    logger.info(f"OCR images: {len(image_bytes_list)} | {total_in // 1024} KB -> {total_out // 1024} KB sent")
+
     contents.append("Analyze these medical document images. Extract all clinical entities following your instruction rules. Return structured JSON.")
 
     import time
@@ -1405,13 +1438,13 @@ async def process_batch_ocr(image_bytes_list: List[bytes], media_types: List[str
                     temperature=0.0
                 )
             )
-            response = await asyncio.wait_for(call_coro, timeout=20.0)
+            response = await asyncio.wait_for(call_coro, timeout=model_config.VISION_TIMEOUT)
             parsed = response.parsed
             if parsed:
                 logger.info(f"Batch OCR succeeded with model {model_name} in {time.time()-start_time:.2f}s")
                 break
         except asyncio.TimeoutError:
-            logger.warning(f"⚡ Batch OCR timed out on {model_name} (20s limit) — cascading to backup")
+            logger.warning(f"⚡ Batch OCR timed out on {model_name} ({model_config.VISION_TIMEOUT:.0f}s limit) — cascading to backup")
             last_err = "Model timeout"
             continue
         except Exception as e:
