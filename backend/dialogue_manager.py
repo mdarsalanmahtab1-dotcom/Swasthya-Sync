@@ -72,7 +72,7 @@ class DialogueManager:
             self.record.update_filled_state("height", height, confidence=1.0)
         if vitals:
             self.record.update_filled_state("vitals", vitals, confidence=1.0)
-        logger.info(f"Demographics set: name={name}, age={age}, sex={sex}, weight={weight}, height={height}, vitals={vitals}")
+        logger.info(f"Demographics set: age={age}, sex={sex}, weight={weight}, height={height}, vitals={vitals}")
 
     def set_previous_history(self, history: dict | None):
         """Inject previous encounter history for follow-up context."""

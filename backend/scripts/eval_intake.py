@@ -27,6 +27,11 @@ import model_config  # noqa: E402
 from dialogue_manager import DialogueManager  # noqa: E402
 from red_flag_library import get_safety_floor  # noqa: E402
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows consoles default to cp1252
+except Exception:
+    pass
+
 # All patients are made up. red_flag=True means the script describes an emergency.
 SCRIPTS = [
     {"id": "P01", "lang": "en-IN", "age": 56, "sex": "Male", "red_flag": True,

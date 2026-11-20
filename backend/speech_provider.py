@@ -109,6 +109,14 @@ def _rest_interaction(body: dict, timeout: float) -> dict:
     return r.json()
 
 
+def _interaction(client, body: dict, timeout: float = 30.0):
+    """Interactions call. With an API key we use the REST endpoint directly: google-genai 1.x sends
+    a legacy Interactions schema the API now rejects (needs SDK >= 2). Vertex/ADC mode uses the SDK."""
+    if os.environ.get("GEMINI_API_KEY", "").strip():
+        return _rest_interaction(body, timeout)
+    return client.interactions.create(**body)
+
+
 def _get(obj, name, default=None):
     if isinstance(obj, dict):
         return obj.get(name, default)
@@ -199,14 +207,9 @@ class GoogleSpeechProvider:
         lang_codes = [hint_language] if hint_language in LANGUAGE_NAMES else []
         gen_cfg = {"transcription_config": {"language_codes": lang_codes}}
         t0 = time.time()
-        try:
-            resp = client.interactions.create(
-                model=model_config.STT_MODEL, input=[audio_item], generation_config=gen_cfg,
-            )
-        except TypeError:
-            resp = _rest_interaction(
-                {"model": model_config.STT_MODEL, "input": [audio_item], "generation_config": gen_cfg}, 30.0,
-            )
+        resp = _interaction(
+            client, {"model": model_config.STT_MODEL, "input": [audio_item], "generation_config": gen_cfg},
+        )
         transcript = _output_text(resp).strip()
         logger.info(f"Google STT: {len(audio_bytes)}B {mime} lang_hint={hint_language} "
                     f"-> {len(transcript)} chars in {time.time() - t0:.2f}s")
@@ -220,10 +223,7 @@ class GoogleSpeechProvider:
             "response_format": {"type": "audio", "mime_type": "audio/l16", "sample_rate": TTS_SAMPLE_RATE},
             "generation_config": {"speech_config": [{"voice": voice}]},
         }
-        try:
-            resp = client.interactions.create(**body)
-        except TypeError:
-            resp = _rest_interaction(body, 30.0)
+        resp = _interaction(client, body)
         b64 = _output_audio_b64(resp)
         if not b64:
             raise RuntimeError("TTS returned no audio")

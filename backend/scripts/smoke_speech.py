@@ -12,6 +12,11 @@ from difflib import SequenceMatcher
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import speech_provider as sp  # noqa: E402
 
+try:
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows consoles default to cp1252
+except Exception:
+    pass
+
 CASES = [
     ("hi-IN", "मुझे तीन दिन से बुखार और सिर में दर्द है।"),
     ("bn-IN", "আমার দুই দিন ধরে কাশি আর বুকে ব্যথা হচ্ছে।"),
