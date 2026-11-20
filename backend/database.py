@@ -38,21 +38,64 @@ async def _bootstrap_admin(conn):
         logger.warning(f"Admin bootstrap failed ({type(e).__name__})")
 
 
-async def init_db_pool():
-    global _pool
-    # DATABASE_URL (AlloyDB / any Postgres) first; SUPABASE_DB_URL kept for backward compatibility.
-    db_url = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
-    if not db_url:
-        logger.error("DATABASE_URL (or SUPABASE_DB_URL) is missing. DB won't work.")
-        return
-    _pool = await asyncpg.create_pool(
-        db_url,
-        min_size=2,
+_alloydb_connector = None
+
+
+async def _create_pool():
+    """Plain DSN (default) or the AlloyDB Python connector when ALLOYDB_INSTANCE_URI is set."""
+    global _alloydb_connector
+    pool_kwargs = dict(
+        min_size=1,
         max_size=20,
         max_inactive_connection_lifetime=60.0,
         command_timeout=30.0,
         statement_cache_size=0,
     )
+    instance_uri = (os.getenv("ALLOYDB_INSTANCE_URI") or "").strip()
+    if instance_uri:
+        # pip install "google-cloud-alloydb-connector[asyncpg]"; IAM: AlloyDB Client role.
+        from google.cloud.alloydbconnector import AsyncConnector
+        if _alloydb_connector is None:
+            _alloydb_connector = AsyncConnector()
+        ip_type = (os.getenv("ALLOYDB_IP_TYPE") or "PUBLIC").upper()  # PUBLIC | PRIVATE | PSC
+        user, password = os.getenv("ALLOYDB_USER", "postgres"), os.getenv("ALLOYDB_PASSWORD", "")
+        db = os.getenv("ALLOYDB_DB", "postgres")
+        return await asyncpg.create_pool(
+            instance_uri,
+            connect=lambda instance_connection_name, **kwargs: _alloydb_connector.connect(
+                instance_connection_name, "asyncpg", user=user, password=password, db=db, ip_type=ip_type,
+            ),
+            **pool_kwargs,
+        )
+    # DATABASE_URL (AlloyDB / any Postgres) first; SUPABASE_DB_URL kept for backward compatibility.
+    db_url = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
+    if not db_url:
+        return None
+    return await asyncpg.create_pool(db_url, **pool_kwargs)
+
+
+async def init_db_pool():
+    """Create the pool, retrying with backoff for ~30 s (AlloyDB Express may be waking from idle)."""
+    global _pool
+    if not (os.getenv("ALLOYDB_INSTANCE_URI") or os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")):
+        logger.error("DATABASE_URL (or SUPABASE_DB_URL / ALLOYDB_INSTANCE_URI) is missing. DB won't work.")
+        return
+    delay, waited = 1.0, 0.0
+    while True:
+        try:
+            _pool = await _create_pool()
+            break
+        except Exception as e:
+            if waited >= 30:
+                logger.error(f"Database unreachable after {waited:.0f}s ({type(e).__name__}); continuing without DB")
+                _pool = None
+                return
+            logger.warning(f"DB connect failed ({type(e).__name__}); retrying in {delay:.0f}s")
+            await asyncio.sleep(delay)
+            waited += delay
+            delay = min(delay * 2, 8)
+    if _pool is None:
+        return
     async with _pool.acquire() as conn:
         try:
             await conn.execute("ALTER TABLE patients ADD COLUMN IF NOT EXISTS vitals TEXT")
