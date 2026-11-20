@@ -5,6 +5,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { getApiBaseUrl } from '../config';
 import { ArrowLeft, FileText, CheckCircle, Activity, HeartPulse, LogOut, Loader2, User, Download } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { apiFetch } from '../lib/api';
 
 export const DoctorDashboard: React.FC = () => {
   const { session_id } = useParams();
@@ -19,7 +20,7 @@ export const DoctorDashboard: React.FC = () => {
 
   useEffect(() => {
     // Fetch patient data from triage queue first
-    fetch(`${getApiBaseUrl()}/api/triage/queue`)
+    apiFetch(`${getApiBaseUrl()}/api/triage/queue`)
       .then(res => res.json())
       .then(async data => {
         const q = data.queue || data || [];
@@ -28,7 +29,7 @@ export const DoctorDashboard: React.FC = () => {
           setPatient(p);
         } else {
           // If not in queue, fetch directly (might be completed or just not in triage queue)
-          const res = await fetch(`${getApiBaseUrl()}/api/session/${session_id}`);
+          const res = await apiFetch(`${getApiBaseUrl()}/api/session/${session_id}`);
           if (res.ok) {
             const data = await res.json();
             setPatient(data);
@@ -37,7 +38,7 @@ export const DoctorDashboard: React.FC = () => {
           }
         }
         // Mark session as IN_PROGRESS if it was WAITING
-        fetch(`${getApiBaseUrl()}/api/session/${session_id}/start`, { method: 'POST' }).catch(() => {});
+        apiFetch(`${getApiBaseUrl()}/api/session/${session_id}/start`, { method: 'POST' }).catch(() => {});
       })
       .catch(err => {
         console.error(err);
@@ -48,7 +49,7 @@ export const DoctorDashboard: React.FC = () => {
   const handleComplete = async () => {
     setIsSaving(true);
     try {
-      const res = await fetch(`${getApiBaseUrl()}/api/session/${session_id}/complete`, {
+      const res = await apiFetch(`${getApiBaseUrl()}/api/session/${session_id}/complete`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -69,7 +70,7 @@ export const DoctorDashboard: React.FC = () => {
 
         // 1. Direct file download via blob fetch
         try {
-          const fileResp = await fetch(downloadUrl);
+          const fileResp = await apiFetch(downloadUrl);
           if (fileResp.ok) {
             const blob = await fileResp.blob();
             const blobUrl = window.URL.createObjectURL(blob);

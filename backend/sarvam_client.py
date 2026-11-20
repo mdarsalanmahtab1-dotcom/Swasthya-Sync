@@ -190,7 +190,7 @@ def speech_to_text(
         transcript = data.get("transcript", "")
         detected_lang = data.get("language_code", hint_language)
 
-        logger.info(f"STT result: '{transcript[:80]}' | lang={detected_lang}")
+        logger.info(f"STT result: {len(transcript)} chars | lang={detected_lang}")
         return {
             "transcript": transcript,
             "language_code": detected_lang,

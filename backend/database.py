@@ -17,6 +17,27 @@ logger = logging.getLogger(__name__)
 
 _pool = None
 
+async def _bootstrap_admin(conn):
+    """Create/update the admin account from ADMIN_EMAIL + ADMIN_BOOTSTRAP_PASSWORD (never hard-coded)."""
+    email = (os.getenv("ADMIN_EMAIL") or "").strip().lower()
+    password = os.getenv("ADMIN_BOOTSTRAP_PASSWORD") or ""
+    if not email or not password:
+        logger.info("Admin bootstrap skipped (ADMIN_EMAIL / ADMIN_BOOTSTRAP_PASSWORD not set)")
+        return
+    import auth_utils
+    try:
+        row = await conn.fetchrow("SELECT password_hash FROM staff WHERE id = $1", email)
+        if row and auth_utils.verify_password(row["password_hash"], password)[0] and auth_utils.is_hashed(row["password_hash"]):
+            return
+        await conn.execute(
+            """INSERT INTO staff (id, name, role, password_hash) VALUES ($1, 'Administrator', 'ADMIN', $2)
+               ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = 'ADMIN'""",
+            email, auth_utils.hash_password(password))
+        logger.info("Admin account bootstrapped from env")
+    except Exception as e:
+        logger.warning(f"Admin bootstrap failed ({type(e).__name__})")
+
+
 async def init_db_pool():
     global _pool
     # DATABASE_URL (AlloyDB / any Postgres) first; SUPABASE_DB_URL kept for backward compatibility.
@@ -36,8 +57,11 @@ async def init_db_pool():
         try:
             await conn.execute("ALTER TABLE patients ADD COLUMN IF NOT EXISTS vitals TEXT")
             await conn.execute("ALTER TABLE staff_sessions DROP CONSTRAINT IF EXISTS staff_sessions_staff_id_fkey")
+            await conn.execute("ALTER TABLE staff_sessions ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now()")
+            await conn.execute("UPDATE staff_sessions SET created_at = now() - interval '13 hours' WHERE created_at IS NULL")
         except Exception as e:
-            logger.warning(f"Could not apply startup schema patches: {e}")
+            logger.warning(f"Could not apply startup schema patches: {type(e).__name__}")
+        await _bootstrap_admin(conn)
     logger.info("Database pool initialized.")
 
 async def close_db_pool():
@@ -488,6 +512,14 @@ async def add_department(name: str):
     async with _pool.acquire() as conn:
         await conn.execute("INSERT INTO departments (name) VALUES ($1)", name)
 
+def _pw_for_store(password: str | None) -> str | None:
+    """Never store plaintext: hash new passwords with scrypt; keep already-hashed values."""
+    if not password:
+        return None
+    import auth_utils
+    return password if auth_utils.is_hashed(password) else auth_utils.hash_password(password)
+
+
 async def get_doctors() -> list[dict]:
     if not _pool: return []
     for attempt in range(2):
@@ -496,7 +528,7 @@ async def get_doctors() -> list[dict]:
                 records = await conn.fetch("""
                     SELECT 
                         d.doctor_id, d.full_name, d.license_number, d.profile_image_url, 
-                        d.max_daily_patients, d.status, d.room_number, d.dept_id, d.username, d.password, d.current_status, dept.name as dept_name,
+                        d.max_daily_patients, d.status, d.room_number, d.dept_id, d.username, '' AS password, d.current_status, dept.name as dept_name,
                         (SELECT COUNT(*) FROM patient_sessions ps 
                          WHERE ps.department = dept.name 
                          AND (ps.created_at AT TIME ZONE 'Asia/Kolkata')::date = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date) as total_seen_today
@@ -517,6 +549,7 @@ async def get_doctors() -> list[dict]:
 async def add_doctor(full_name: str, dept_id: int, license_number: str, max_daily_patients: int = 40, profile_image_url: str = None, room_number: str = "TBD", username: str = None, password: str = None):
     import uuid
     doctor_id = str(uuid.uuid4())
+    password = _pw_for_store(password)
     if not _pool: return
     async with _pool.acquire() as conn:
         await conn.execute(
@@ -526,17 +559,18 @@ async def add_doctor(full_name: str, dept_id: int, license_number: str, max_dail
 
 async def update_doctor(doctor_id: str, full_name: str, dept_id: int, license_number: str, max_daily_patients: int, status: str, room_number: str, profile_image_url: str = None, username: str = None, password: str = None, current_status: str = 'Available'):
     if not _pool: return
+    password = _pw_for_store(password)  # None (blank in the form) keeps the existing password
     async with _pool.acquire() as conn:
         if profile_image_url:
             await conn.execute("""
                 UPDATE doctors 
-                SET full_name = $1, dept_id = $2, license_number = $3, max_daily_patients = $4, status = $5, room_number = $6, profile_image_url = $7, username = $8, password = $9, current_status = $10
+                SET full_name = $1, dept_id = $2, license_number = $3, max_daily_patients = $4, status = $5, room_number = $6, profile_image_url = $7, username = $8, password = COALESCE($9, password), current_status = $10
                 WHERE doctor_id = $11
             """, full_name, dept_id, license_number, max_daily_patients, status, room_number, profile_image_url, username, password, current_status, doctor_id)
         else:
             await conn.execute("""
                 UPDATE doctors 
-                SET full_name = $1, dept_id = $2, license_number = $3, max_daily_patients = $4, status = $5, room_number = $6, username = $7, password = $8, current_status = $9
+                SET full_name = $1, dept_id = $2, license_number = $3, max_daily_patients = $4, status = $5, room_number = $6, username = $7, password = COALESCE($8, password), current_status = $9
                 WHERE doctor_id = $10
             """, full_name, dept_id, license_number, max_daily_patients, status, room_number, username, password, current_status, doctor_id)
 

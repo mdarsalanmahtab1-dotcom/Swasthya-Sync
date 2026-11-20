@@ -31,7 +31,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # Load .env before anything else
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Response, Query
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -42,6 +42,7 @@ os.makedirs("uploads", exist_ok=True)
 from dialogue_manager import DialogueManager
 from ocr_pipeline import process_document
 import speech_provider
+import auth_utils
 from routes_extended import extended_router, set_sessions_ref, escalate_queue_priority
 from routes_admin import admin_router
 
@@ -127,13 +128,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+from routes_extended import require_role  # server-side staff auth
+
+
+@app.exception_handler(Exception)
+async def _unhandled_error(request, exc):
+    """Never return stack traces or internal error text to clients."""
+    logger.error(f"Unhandled error on {request.method} {request.url.path}: {type(exc).__name__}")
+    return JSONResponse(status_code=500, content={"error": "Internal server error"})
 app.include_router(extended_router)
 app.include_router(admin_router)
 set_sessions_ref(sessions)  # Bridge: let routes_extended read live PatientRecord data
 
 os.makedirs("static/prescriptions", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+# /uploads is NOT mounted publicly: patient documents are served only via authenticated endpoints.
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -174,12 +183,26 @@ async def create_session(
 
 
 @app.get("/api/record/{session_id}")
-async def get_record(session_id: str):
+async def get_record(session_id: str, _auth: dict = Depends(require_role("DOCTOR", "NURSE", "ADMIN"))):
     """Get the full patient record for a session."""
     dm = sessions.get(session_id)
     if not dm:
         return {"error": "Session not found"}
     return dm.get_record()
+
+
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGES = 10
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/heic", "image/heif", "application/pdf"}
+
+
+def _check_image(content_type: str | None, data: bytes) -> str:
+    ctype = (content_type or "image/jpeg").lower()
+    if ctype not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=415, detail="Unsupported file type")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 10 MB)")
+    return ctype
 
 
 @app.post("/api/ocr")
@@ -188,9 +211,9 @@ async def upload_document(
     session_id: str = Form(""),
 ):
     """Upload a document image for OCR processing."""
-    logger.info(f"Starting OCR upload for session_id: {session_id}, filename: {file.filename}")
     image_bytes = await file.read()
-    content_type = file.content_type or "image/jpeg"
+    content_type = _check_image(file.content_type, image_bytes)
+    logger.info(f"OCR upload: session={session_id} size={len(image_bytes)}B type={content_type}")
     
     from supabase import create_client
     import uuid
@@ -266,8 +289,8 @@ async def upload_document_batch(
     patient_name: str = Form("Unknown Patient")
 ):
     """Upload multiple document images for batch OCR processing."""
-    if len(files) > 5:
-        raise HTTPException(status_code=400, detail="Maximum 5 images allowed per batch.")
+    if len(files) > min(5, MAX_IMAGES):
+        raise HTTPException(status_code=413, detail="Maximum 5 images allowed per batch.")
 
     image_bytes_list = []
     media_types = []
@@ -285,8 +308,8 @@ async def upload_document_batch(
     
     for file in files:
         img_bytes = await file.read()
+        ctype = _check_image(file.content_type, img_bytes)
         image_bytes_list.append(img_bytes)
-        ctype = file.content_type or "image/jpeg"
         media_types.append(ctype)
         
         safe_filename = f"{uuid.uuid4().hex[:8]}_{file.filename or 'doc.jpg'}"
@@ -343,7 +366,7 @@ async def upload_document_batch(
     return {"status": "success", "results": [result]}
 
 @app.get("/api/record/{session_id}/timeline")
-async def get_patient_timeline(session_id: str):
+async def get_patient_timeline(session_id: str, _auth: dict = Depends(require_role("DOCTOR", "NURSE", "ADMIN"))):
     """Get a chronologically sorted timeline of patient documents with red flags."""
     dm = sessions.get(session_id)
     if not dm:
@@ -389,7 +412,7 @@ async def get_patient_timeline(session_id: str):
 # Sarvam AI — STT / TTS Endpoints (async, non-blocking)
 # ──────────────────────────────────────────────────────────────────────
 
-@app.post("/api/stt")
+@app.post("/api/stt", dependencies=[Depends(auth_utils.rate_limit("stt", 30))])
 async def speech_to_text_endpoint(
     audio: UploadFile = File(...),
     language: str = Form("hi-IN"),
@@ -433,7 +456,7 @@ async def speech_to_text_endpoint(
     return result
 
 
-@app.post("/api/tts")
+@app.post("/api/tts", dependencies=[Depends(auth_utils.rate_limit("tts", 30))])
 async def text_to_speech_endpoint(
     text: str = Form(...),
     language: str = Form("hi-IN"),
@@ -566,7 +589,7 @@ async def websocket_session(ws: WebSocket, session_id: str = Query(None)):
 
                 ui = dm.start_session()
                 sessions[dm.record.session_id] = dm
-                logger.info(f"Session started: {dm.record.session_id} | lang={language} | mode={clinic_mode} | name={patient_name} | patient_id={patient_id}")
+                logger.info(f"Session started: {dm.record.session_id} | lang={language} | mode={clinic_mode} | patient_id={patient_id}")
                 await ws.send_json({"type": "ui", **ui})
 
             elif msg_type == "resume":

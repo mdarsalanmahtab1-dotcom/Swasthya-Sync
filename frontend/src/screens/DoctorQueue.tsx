@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { Stethoscope, ArrowRight, User, LogOut, Coffee, CheckCircle, Settings, X, History, FileText, ChevronDown, ChevronUp, ShieldAlert } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { getApiBaseUrl } from '../config';
+import { apiFetch } from '../lib/api';
 
 // True when the backend could not get an AI summary (it then sends no invented data).
 const isAiUnavailable = (s: any): boolean => {
@@ -48,7 +49,7 @@ export const DoctorQueue: React.FC = () => {
     if (doctorAuth) {
       const fetchQ = () => {
         const docIdParam = doctorAuth?.doctor_id ? `?doctor_id=${doctorAuth.doctor_id}` : '';
-        fetch(`${getApiBaseUrl()}/api/triage/queue${docIdParam}`)
+        apiFetch(`${getApiBaseUrl()}/api/triage/queue${docIdParam}`)
           .then(res => res.json())
           .then(data => {
             const q = data.queue || data || [];
@@ -97,7 +98,7 @@ export const DoctorQueue: React.FC = () => {
   const handleStatusChange = async (newStatus: string) => {
     if (!doctorAuth) return;
     try {
-      const res = await fetch(`${getApiBaseUrl()}/api/doctor/${doctorAuth.doctor_id}/status`, {
+      const res = await apiFetch(`${getApiBaseUrl()}/api/doctor/${doctorAuth.doctor_id}/status`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: newStatus })
@@ -116,7 +117,7 @@ export const DoctorQueue: React.FC = () => {
     setShowSettingsModal(true);
     if (!doctorAuth) return;
     try {
-      const res = await fetch(`${getApiBaseUrl()}/api/doctor/${doctorAuth.doctor_id}/instructions`);
+      const res = await apiFetch(`${getApiBaseUrl()}/api/doctor/${doctorAuth.doctor_id}/instructions`);
       if (res.ok) {
         const data = await res.json();
         setCustomInstructions(data.custom_instructions || '');
@@ -130,7 +131,7 @@ export const DoctorQueue: React.FC = () => {
     if (!doctorAuth) return;
     setIsSavingSettings(true);
     try {
-      await fetch(`${getApiBaseUrl()}/api/doctor/${doctorAuth.doctor_id}/instructions`, {
+      await apiFetch(`${getApiBaseUrl()}/api/doctor/${doctorAuth.doctor_id}/instructions`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ custom_instructions: customInstructions })
@@ -147,7 +148,7 @@ export const DoctorQueue: React.FC = () => {
   const openHistory = async (patientId: string) => {
     setHistoryPatientId(patientId);
     try {
-      const res = await fetch(`${getApiBaseUrl()}/api/patient/${patientId}/summaries`);
+      const res = await apiFetch(`${getApiBaseUrl()}/api/patient/${patientId}/summaries`);
       const data = await res.json();
       setHistoryData(data.summaries || []);
     } catch { setHistoryData([]); }
@@ -157,7 +158,7 @@ export const DoctorQueue: React.FC = () => {
   const openSummary = async (sessionId: string) => {
     setSummarySessionId(sessionId);
     try {
-      const res = await fetch(`${getApiBaseUrl()}/api/doctor/encounter/${sessionId}`);
+      const res = await apiFetch(`${getApiBaseUrl()}/api/doctor/encounter/${sessionId}`);
       const data = await res.json();
       setSummaryData(data);
     } catch { setSummaryData(null); }

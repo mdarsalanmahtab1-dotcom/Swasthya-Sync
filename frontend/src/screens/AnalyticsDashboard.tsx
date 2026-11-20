@@ -7,6 +7,7 @@ import { TrendingUp, Users, Clock, AlertTriangle, FileText, ShieldAlert, Zap, Ti
 import { motion } from 'framer-motion';
 import { AnimatedNumber } from '../components/AnimatedNumber';
 import { getApiBaseUrl } from '../config';
+import { apiFetch } from '../lib/api';
 
 const API_BASE = `${getApiBaseUrl()}/api/admin`;
 
@@ -133,8 +134,8 @@ export function AnalyticsDashboard() {
 
     setLoading(true);
     Promise.all([
-      fetch(`${API_BASE}/dashboard-data?${params}`).then(r => r.json()).catch(() => null),
-      fetch(`${API_BASE}/impact-metrics`).then(r => r.json()).catch(() => null),
+      apiFetch(`${API_BASE}/dashboard-data?${params}`).then(r => r.json()).catch(() => null),
+      apiFetch(`${API_BASE}/impact-metrics`).then(r => r.json()).catch(() => null),
     ]).then(([dash, impact]) => {
       setDashData(dash);
       setImpactData(impact);
@@ -340,7 +341,7 @@ export function RedFlagFeed() {
 
   useEffect(() => {
     const fetchFlags = () => {
-      fetch(`${API_BASE}/red-flags-live`)
+      apiFetch(`${API_BASE}/red-flags-live`)
         .then(r => r.json())
         .then(data => setFlags(Array.isArray(data) ? data : []))
         .catch(console.error);

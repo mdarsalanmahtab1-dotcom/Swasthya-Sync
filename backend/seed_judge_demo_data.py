@@ -24,7 +24,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def hash_pw(pwd: str) -> str:
-    return hashlib.sha256(pwd.encode()).hexdigest()
+    """Synthetic demo accounts — stored salted + hashed (scrypt), never plaintext."""
+    import auth_utils
+    return auth_utils.hash_password(pwd)
 
 import database
 
@@ -86,7 +88,7 @@ async def seed_demo_data(reset: bool = True):
                 dept_id = EXCLUDED.dept_id,
                 room_number = EXCLUDED.room_number,
                 current_status = EXCLUDED.current_status
-        """, doc_id, uname, pwd, name, d_id, lic, max_p, st, c_st, room, shift)
+        """, doc_id, uname, hash_pw(pwd), name, d_id, lic, max_p, st, c_st, room, shift)
 
     # Seed Admin and Nurse in staff
     staff_members = [

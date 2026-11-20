@@ -8,6 +8,8 @@ so that the queue system can read real PatientRecord state.
 
 from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import auth_utils
+import database
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime
@@ -55,7 +57,7 @@ class MobileOtpConfirmReq(BaseModel):
 
 # ── ABDM M1 Endpoints ─────────────────────────────────────────────────
 
-@extended_router.post("/api/abdm/auth/init")
+@extended_router.post("/api/abdm/auth/init", dependencies=[Depends(auth_utils.rate_limit("otp", 10))])
 async def abdm_init(req: AbdmInitReq):
     """
     Path A Step 1: Patient enters their ABHA address.
@@ -80,7 +82,7 @@ async def abdm_init(req: AbdmInitReq):
         "profile": profile,
         "path": "A",
     }
-    logger.info(f"[ABDM/A] OTP requested for {req.abha_number} → txn={result.transaction_id}")
+    logger.info(f"[ABDM/A] OTP requested → txn={result.transaction_id}")
 
     return {
         "transaction_id": result.transaction_id,
@@ -91,7 +93,7 @@ async def abdm_init(req: AbdmInitReq):
     }
 
 
-@extended_router.post("/api/abdm/auth/confirm")
+@extended_router.post("/api/abdm/auth/confirm", dependencies=[Depends(auth_utils.rate_limit("otp", 10))])
 async def abdm_confirm(req: AbdmConfirmReq):
     """
     Path A Step 2: Patient enters OTP.
@@ -123,7 +125,7 @@ async def abdm_confirm(req: AbdmConfirmReq):
     }
 
 
-@extended_router.post("/api/abdm/auth/mobile/init")
+@extended_router.post("/api/abdm/auth/mobile/init", dependencies=[Depends(auth_utils.rate_limit("otp", 10))])
 async def mobile_otp_init(req: MobileOtpInitReq):
     """
     Path B Step 1: Walk-in patient enters their mobile number.
@@ -150,7 +152,7 @@ async def mobile_otp_init(req: MobileOtpInitReq):
     }
 
 
-@extended_router.post("/api/abdm/auth/mobile/confirm")
+@extended_router.post("/api/abdm/auth/mobile/confirm", dependencies=[Depends(auth_utils.rate_limit("otp", 10))])
 async def mobile_otp_confirm(req: MobileOtpConfirmReq):
     """
     Path B Step 2: Patient enters OTP for their mobile.
@@ -227,13 +229,17 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "swasthyasync.db")
 security = HTTPBearer(auto_error=False)
 
 def _hash_password(pw: str) -> str:
-    return hashlib.sha256(pw.encode()).hexdigest()
+    return auth_utils.hash_password(pw)
 
 async def _issue_token(staff_id: str, role: str, name: str) -> str:
-    token = f"{role}:{staff_id}:{secrets.token_hex(8)}"
+    """Secure random token; the role lives in the staff_sessions row, not in the token."""
+    token = auth_utils.new_token()
     if database._pool:
         async with database._pool.acquire() as conn:
-            await conn.execute("INSERT INTO staff_sessions (token, staff_id, role, name) VALUES ($1, $2, $3, $4)", token, staff_id, role, name)
+            await conn.execute(
+                "INSERT INTO staff_sessions (token, staff_id, role, name, created_at) VALUES ($1, $2, $3, $4, now())",
+                token, staff_id, role, name,
+            )
     return token
 
 async def _get_current_staff(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
@@ -241,19 +247,54 @@ async def _get_current_staff(credentials: HTTPAuthorizationCredentials = Depends
         raise HTTPException(401, "Missing auth token")
     token_str = credentials.credentials
     if not database._pool:
-        raise HTTPException(500, "DB not initialized")
+        raise HTTPException(503, "DB not initialized")
     async with database._pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT staff_id as id, role, name FROM staff_sessions WHERE token = $1", token_str)
+        row = await conn.fetchrow(
+            f"SELECT staff_id as id, role, name FROM staff_sessions WHERE token = $1 "
+            f"AND created_at > now() - interval '{auth_utils.TOKEN_TTL_HOURS} hours'",
+            token_str,
+        )
         if not row:
             raise HTTPException(401, "Invalid or expired token")
         return dict(row)
 
 def _require_role(*allowed_roles):
+    """FastAPI dependency: valid, unexpired staff token with one of the allowed roles."""
     async def checker(staff: dict = Depends(_get_current_staff)):
         if staff["role"] not in allowed_roles:
             raise HTTPException(403, f"Role '{staff['role']}' not authorized. Requires: {allowed_roles}")
         return staff
     return checker
+
+
+require_role = _require_role
+
+
+async def _check_doctor_password(conn, username: str, password: str):
+    row = await conn.fetchrow(
+        "SELECT * FROM doctors WHERE username = $1 AND status = 'Active'", username)
+    if not row:
+        return None
+    ok, upgrade = auth_utils.verify_password(row["password"], password)
+    if not ok:
+        return None
+    if upgrade:
+        await conn.execute("UPDATE doctors SET password = $1 WHERE doctor_id = $2",
+                           auth_utils.hash_password(password), row["doctor_id"])
+    return row
+
+
+async def _check_staff_password(conn, staff_id: str, password: str):
+    row = await conn.fetchrow("SELECT id, name, role, password_hash FROM staff WHERE id = $1", staff_id)
+    if not row:
+        return None
+    ok, upgrade = auth_utils.verify_password(row["password_hash"], password)
+    if not ok:
+        return None
+    if upgrade:
+        await conn.execute("UPDATE staff SET password_hash = $1 WHERE id = $2",
+                           auth_utils.hash_password(password), row["id"])
+    return row
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -301,28 +342,38 @@ class StaffLoginReq(BaseModel):
     username: str
     password: str
 
-@extended_router.post("/api/auth/staff/login")
+@extended_router.post("/api/auth/staff/login", dependencies=[Depends(auth_utils.rate_limit("login", 5))])
 async def staff_login(req: StaffLoginReq):
     import database
-    import hashlib
-    if not database._pool: raise HTTPException(500, "DB error")
+    if not database._pool: raise HTTPException(503, "DB error")
     async with database._pool.acquire() as conn:
-        # Check doctors table
-        row = await conn.fetchrow(
-            "SELECT doctor_id as id, full_name as name, 'DOCTOR' as role FROM doctors WHERE username = $1 AND password = $2 AND status = 'Active'",
-            req.username, req.password
-        )
-        if not row:
-            # Check staff table (ADMIN, NURSE, RECEPTIONIST)
-            pw_hash = hashlib.sha256(req.password.encode()).hexdigest()
-            row = await conn.fetchrow(
-                "SELECT id, name, role FROM staff WHERE id = $1 AND (password_hash = $2 OR password_hash = $3)",
-                req.username, pw_hash, req.password
-            )
-        if not row:
-            raise HTTPException(401, "Invalid credentials")
-        token = await _issue_token(row["id"], row["role"], row["name"])
-        return {"token": token, "role": row["role"], "name": row["name"], "staff_id": row["id"]}
+        doc = await _check_doctor_password(conn, req.username, req.password)
+        if doc:
+            row = {"id": doc["doctor_id"], "name": doc["full_name"], "role": "DOCTOR"}
+        else:
+            st = await _check_staff_password(conn, req.username, req.password)
+            row = {"id": st["id"], "name": st["name"], "role": st["role"]} if st else None
+    if not row:
+        raise HTTPException(401, "Invalid credentials")
+    token = await _issue_token(row["id"], row["role"], row["name"])
+    return {"token": token, "role": row["role"], "name": row["name"], "staff_id": row["id"]}
+
+
+class AdminLoginReq(BaseModel):
+    email: str
+    password: str
+
+
+@extended_router.post("/api/admin/login", dependencies=[Depends(auth_utils.rate_limit("login", 5))])
+async def admin_login(req: AdminLoginReq):
+    """Server-side admin login (account bootstrapped from ADMIN_EMAIL + ADMIN_BOOTSTRAP_PASSWORD)."""
+    if not database._pool: raise HTTPException(503, "DB error")
+    async with database._pool.acquire() as conn:
+        st = await _check_staff_password(conn, req.email.strip().lower(), req.password)
+    if not st or st["role"] != "ADMIN":
+        raise HTTPException(401, "Invalid credentials")
+    token = await _issue_token(st["id"], "ADMIN", st["name"])
+    return {"token": token, "role": "ADMIN", "name": st["name"], "staff_id": st["id"]}
 
 @extended_router.post("/api/auth/staff/logout")
 async def staff_logout(credentials: HTTPAuthorizationCredentials = Depends(security), staff: dict = Depends(_get_current_staff)):
@@ -418,7 +469,7 @@ async def create_session(payload: StartSessionPayload):
 # ── Phase 2–3: Summaries (real content from PatientRecord) ───────────
 
 @extended_router.post("/api/patient/{patient_id}/summary/{session_id}/generate")
-async def generate_doctor_summary(session_id: str, staff: dict = Depends(_require_role("DOCTOR", "ADMIN"))):
+async def generate_doctor_summary(session_id: str, staff: dict = Depends(_require_role("DOCTOR", "ADMIN")), _auth: dict = Depends(_require_role("DOCTOR", "NURSE", "ADMIN"))):
     raise HTTPException(501, "Not Implemented")
 
 from fastapi.responses import FileResponse
@@ -1039,7 +1090,7 @@ async def get_summary_pdf(session_id: str, regenerate: bool = False, force: bool
 
 
 @extended_router.get("/api/patient/{patient_id}/summaries")
-async def get_patient_summaries(patient_id: str):
+async def get_patient_summaries(patient_id: str, _auth: dict = Depends(_require_role("DOCTOR", "NURSE", "ADMIN"))):
     import database
     if not database._pool: raise HTTPException(500, "DB error")
     async with database._pool.acquire() as conn:
@@ -1115,7 +1166,7 @@ async def confirm_document_extraction(session_id: str):
 # ── Phase 3: Queue ───────────────────────────────────────────────────
 
 @extended_router.get("/api/queue")
-async def get_queue():
+async def get_queue(_auth: dict = Depends(_require_role("DOCTOR", "NURSE", "ADMIN"))):
     import database
     queue = await database.fetch_triage_queue()
     return {"queue": queue}
@@ -1135,7 +1186,7 @@ class StatusUpdate(BaseModel):
     status: str
 
 @extended_router.put("/api/queue/{token_id}/status")
-async def update_queue_status(token_id: str, payload: StatusUpdate):
+async def update_queue_status(token_id: str, payload: StatusUpdate, _auth: dict = Depends(_require_role("DOCTOR", "NURSE", "ADMIN"))):
     import database
     if not database._pool: raise HTTPException(500, "DB error")
     async with database._pool.acquire() as conn:
@@ -1242,7 +1293,7 @@ async def submit_to_doctor(session_id: str):
     return {"status": "success", "message": "Session submitted to doctor queue"}
 
 @extended_router.post("/api/session/{session_id}/start")
-async def start_consultation(session_id: str):
+async def start_consultation(session_id: str, _auth: dict = Depends(_require_role("DOCTOR", "ADMIN"))):
     """Doctor-facing: marks session as IN_PROGRESS when doctor opens the clinical encounter."""
     import database
     if not database._pool: raise HTTPException(500, "DB error")
@@ -1298,7 +1349,7 @@ async def admin_dashboard(staff: dict = Depends(_require_role("ADMIN"))):
     return stats
 
 @extended_router.get("/api/ocr-audit/{session_id}")
-async def get_ocr_audit(session_id: str):
+async def get_ocr_audit(session_id: str, _auth: dict = Depends(_require_role("DOCTOR", "NURSE", "ADMIN"))):
     dm = _get_dm(session_id)
     if not dm:
         return {"session_id": session_id, "documents": [], "note": "Session not in memory"}
@@ -1308,7 +1359,7 @@ async def get_ocr_audit(session_id: str):
     }
 
 @extended_router.get("/api/triage/queue")
-async def get_triage_queue(doctor_id: Optional[str] = None):
+async def get_triage_queue(doctor_id: Optional[str] = None, _auth: dict = Depends(_require_role("DOCTOR", "NURSE", "ADMIN"))):
     import database
     queue = await database.fetch_triage_queue(doctor_id)
     return {"queue": queue}
@@ -1336,14 +1387,16 @@ class CompleteSessionReq(BaseModel):
     doctor_prescription: str
     action: str
 
-@extended_router.post("/api/doctor/login")
+@extended_router.post("/api/doctor/login", dependencies=[Depends(auth_utils.rate_limit("login", 5))])
 async def doctor_login(req: DoctorLoginReq):
-    if not database._pool: raise HTTPException(500, "DB not ready")
+    if not database._pool: raise HTTPException(503, "DB not ready")
     async with database._pool.acquire() as conn:
-        doctor = await conn.fetchrow("SELECT * FROM doctors WHERE username = $1 AND password = $2", req.username, req.password)
+        doctor = await _check_doctor_password(conn, req.username, req.password)
     if not doctor:
         raise HTTPException(status_code=401, detail="Invalid username or password")
+    token = await _issue_token(doctor["doctor_id"], "DOCTOR", doctor["full_name"])
     return {
+        "token": token,
         "doctor_id": doctor["doctor_id"],
         "full_name": doctor["full_name"],
         "dept_id": doctor["dept_id"],
@@ -1352,7 +1405,7 @@ async def doctor_login(req: DoctorLoginReq):
     }
 
 @extended_router.put("/api/doctor/{doctor_id}/status")
-async def update_doctor_status(doctor_id: str, req: DoctorStatusReq):
+async def update_doctor_status(doctor_id: str, req: DoctorStatusReq, _auth: dict = Depends(_require_role("DOCTOR", "ADMIN"))):
     if database._pool:
         async with database._pool.acquire() as conn:
             await conn.execute("UPDATE doctors SET current_status = $1 WHERE doctor_id = $2", req.status, doctor_id)
@@ -1362,7 +1415,7 @@ class DoctorInstructionsReq(BaseModel):
     custom_instructions: str
 
 @extended_router.get("/api/doctor/{doctor_id}/instructions")
-async def get_doctor_instructions(doctor_id: str):
+async def get_doctor_instructions(doctor_id: str, _auth: dict = Depends(_require_role("DOCTOR", "ADMIN"))):
     if database._pool:
         async with database._pool.acquire() as conn:
             doc = await conn.fetchrow("SELECT custom_instructions FROM doctors WHERE doctor_id = $1", doctor_id)
@@ -1371,7 +1424,7 @@ async def get_doctor_instructions(doctor_id: str):
     return {"custom_instructions": ""}
 
 @extended_router.put("/api/doctor/{doctor_id}/instructions")
-async def update_doctor_instructions(doctor_id: str, req: DoctorInstructionsReq):
+async def update_doctor_instructions(doctor_id: str, req: DoctorInstructionsReq, _auth: dict = Depends(_require_role("DOCTOR", "ADMIN"))):
     if database._pool:
         async with database._pool.acquire() as conn:
             await conn.execute("UPDATE doctors SET custom_instructions = $1 WHERE doctor_id = $2", req.custom_instructions, doctor_id)
@@ -1379,7 +1432,7 @@ async def update_doctor_instructions(doctor_id: str, req: DoctorInstructionsReq)
 
 
 @extended_router.post("/api/doctor/notify")
-async def notify_admin(req: DoctorNotifyReq):
+async def notify_admin(req: DoctorNotifyReq, _auth: dict = Depends(_require_role("DOCTOR", "NURSE", "ADMIN"))):
     import uuid
     notif_id = str(uuid.uuid4())
     if database._pool:
@@ -1388,7 +1441,7 @@ async def notify_admin(req: DoctorNotifyReq):
     return {"status": "success", "notif_id": notif_id}
 
 @extended_router.get("/api/admin/notifications")
-async def get_admin_notifications():
+async def get_admin_notifications(_auth: dict = Depends(_require_role("ADMIN"))):
     if not database._pool: return {"notifications": []}
     async with database._pool.acquire() as conn:
         notifs = await conn.fetch("""
@@ -1401,14 +1454,14 @@ async def get_admin_notifications():
     return {"notifications": [dict(n) for n in notifs]}
 
 @extended_router.put("/api/admin/notifications/{notif_id}/read")
-async def mark_notification_read(notif_id: str):
+async def mark_notification_read(notif_id: str, _auth: dict = Depends(_require_role("ADMIN"))):
     if database._pool:
         async with database._pool.acquire() as conn:
             await conn.execute("UPDATE admin_notifications SET is_read = TRUE WHERE notif_id = $1", notif_id)
     return {"status": "success"}
 
 @extended_router.put("/api/session/{session_id}/nurse-triage")
-async def update_nurse_triage(session_id: str, req: NurseTriageReq):
+async def update_nurse_triage(session_id: str, req: NurseTriageReq, _auth: dict = Depends(_require_role("DOCTOR", "NURSE", "ADMIN"))):
     if database._pool:
         async with database._pool.acquire() as conn:
             await conn.execute("UPDATE patient_sessions SET nurse_triage_notes = $1 WHERE session_id = $2", req.nurse_triage_notes, session_id)
@@ -1417,7 +1470,7 @@ async def update_nurse_triage(session_id: str, req: NurseTriageReq):
     return {"status": "success"}
 
 @extended_router.get("/api/session/{session_id}")
-async def get_single_session(session_id: str):
+async def get_single_session(session_id: str, _auth: dict = Depends(_require_role("DOCTOR", "NURSE", "ADMIN"))):
     if not database._pool: return {"error": "DB not initialized"}
     async with database._pool.acquire() as conn:
         row = await conn.fetchrow("""
@@ -1431,7 +1484,7 @@ async def get_single_session(session_id: str):
         return dict(row)
 
 @extended_router.put("/api/session/{session_id}/complete")
-async def complete_session_doctor(session_id: str, req: CompleteSessionReq):
+async def complete_session_doctor(session_id: str, req: CompleteSessionReq, _auth: dict = Depends(_require_role("DOCTOR", "ADMIN"))):
     doc_prescription_str = f"[{req.action}] {req.doctor_prescription}".strip()
     if database._pool:
         async with database._pool.acquire() as conn:

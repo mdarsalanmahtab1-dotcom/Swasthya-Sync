@@ -9,10 +9,13 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { getApiBaseUrl } from '../config';
+import { apiFetch, ADMIN_TOKEN_KEY } from '../lib/api';
+
+// Logged-in admin email (for audit-log entries); set at login, never hard-coded.
+const ADMIN_EMAIL_KEY = 'swasthya_admin_email';
+const getAdminEmail = (): string => { try { return localStorage.getItem(ADMIN_EMAIL_KEY) || ''; } catch { return ''; } };
 
 const API_BASE = `${getApiBaseUrl()}/api/admin`;
-const ADMIN_EMAIL = 'mdzeeshan08886@gmail.com';
-const ADMIN_PASS = 'zeeshan';
 
 const todayDate = new Intl.DateTimeFormat('en-IN', { 
   weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' 
@@ -23,7 +26,7 @@ export const AdminPanel: React.FC = () => {
   
   // Auth State
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    return localStorage.getItem('swasthya_admin_auth') === 'true';
+    try { return !!localStorage.getItem(ADMIN_TOKEN_KEY); } catch { return false; }
   });
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -57,21 +60,39 @@ export const AdminPanel: React.FC = () => {
   const [selectedDeptFilter, setSelectedDeptFilter] = useState<string>('ALL');
   const [showLogoutDialog, setShowLogoutDialog] = useState(false);
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (email === ADMIN_EMAIL && password === ADMIN_PASS) {
+    try {
+      // Server-side check — no credentials live in the frontend bundle.
+      const res = await fetch(`${getApiBaseUrl()}/api/admin/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      if (!res.ok) {
+        setAuthError(res.status === 429 ? 'Too many attempts. Wait a minute.' : 'Invalid admin credentials. Access denied.');
+        return;
+      }
+      const data = await res.json();
+      localStorage.setItem(ADMIN_TOKEN_KEY, data.token);
+      localStorage.setItem('swasthya_admin_email', email.trim().toLowerCase());
+      setPassword('');
       setIsAuthenticated(true);
-      localStorage.setItem('swasthya_admin_auth', 'true');
       setAuthError('');
       fetchAllData();
-    } else {
-      setAuthError('Invalid admin credentials. Access denied.');
+    } catch {
+      setAuthError('Could not reach the server.');
     }
   };
 
   const handleLogout = () => {
     setIsAuthenticated(false);
-    localStorage.removeItem('swasthya_admin_auth');
+    try {
+      const t = localStorage.getItem(ADMIN_TOKEN_KEY);
+      if (t) apiFetch('/api/auth/staff/logout', { method: 'POST' }).catch(() => {});
+      localStorage.removeItem(ADMIN_TOKEN_KEY);
+      localStorage.removeItem('swasthya_admin_email');
+    } catch { /* ignore */ }
     navigate('/');
   };
 
@@ -82,13 +103,13 @@ export const AdminPanel: React.FC = () => {
     isFetchingRef.current = true;
     try {
       const [anRes, quRes, docRes, depRes, patRes, rulRes, logRes] = await Promise.all([
-        fetch(`${API_BASE}/analytics`).then(r => r.json()).catch(() => ({})),
-        fetch(`${API_BASE}/queues`).then(r => r.json()).catch(() => []),
-        fetch(`${API_BASE}/doctors`).then(r => r.json()).catch(() => []),
-        fetch(`${API_BASE}/departments`).then(r => r.json()).catch(() => []),
-        fetch(`${API_BASE}/patients`).then(r => r.json()).catch(() => []),
-        fetch(`${API_BASE}/rules`).then(r => r.json()).catch(() => []),
-        fetch(`${API_BASE}/logs`).then(r => r.json()).catch(() => [])
+        apiFetch(`${API_BASE}/analytics`).then(r => r.json()).catch(() => ({})),
+        apiFetch(`${API_BASE}/queues`).then(r => r.json()).catch(() => []),
+        apiFetch(`${API_BASE}/doctors`).then(r => r.json()).catch(() => []),
+        apiFetch(`${API_BASE}/departments`).then(r => r.json()).catch(() => []),
+        apiFetch(`${API_BASE}/patients`).then(r => r.json()).catch(() => []),
+        apiFetch(`${API_BASE}/rules`).then(r => r.json()).catch(() => []),
+        apiFetch(`${API_BASE}/logs`).then(r => r.json()).catch(() => [])
       ]);
       setAnalytics(anRes || { total_footfall: 0, avg_wait_time: '0m', emergency_active: 0 });
       setQueues(Array.isArray(quRes) ? quRes : []);
@@ -99,7 +120,7 @@ export const AdminPanel: React.FC = () => {
       setLogs(Array.isArray(logRes) ? logRes : []);
 
       // Also fetch notifications
-      fetch(`${API_BASE}/notifications`)
+      apiFetch(`${API_BASE}/notifications`)
         .then(r => r.json())
         .then(d => setNotifications(d.notifications || []))
         .catch(() => {});
@@ -119,22 +140,22 @@ export const AdminPanel: React.FC = () => {
   }, [isAuthenticated]);
 
   const handleMarkNotificationRead = async (notif_id: string) => {
-    await fetch(`${API_BASE}/notifications/${notif_id}/read`, { method: 'PUT' });
+    await apiFetch(`${API_BASE}/notifications/${notif_id}/read`, { method: 'PUT' });
     setNotifications(prev => prev.filter(n => n.notif_id !== notif_id));
   };
 
   const handleDowngrade = async (session_id: string) => {
-    await fetch(`${API_BASE}/queue/${session_id}/downgrade`, {
+    await apiFetch(`${API_BASE}/queue/${session_id}/downgrade`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ admin_email: ADMIN_EMAIL })
+      body: JSON.stringify({ admin_email: getAdminEmail() })
     });
     fetchAllData();
   };
 
   const handleAddDept = async (e: React.FormEvent) => {
     e.preventDefault();
-    await fetch(`${API_BASE}/departments`, {
+    await apiFetch(`${API_BASE}/departments`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: newDept })
@@ -144,7 +165,7 @@ export const AdminPanel: React.FC = () => {
   };
 
   const handleSetDefaultDept = async (deptId: string) => {
-    await fetch(`${API_BASE}/departments/${deptId}/default`, {
+    await apiFetch(`${API_BASE}/departments/${deptId}/default`, {
       method: 'PUT'
     });
     fetchAllData();
@@ -153,10 +174,10 @@ export const AdminPanel: React.FC = () => {
   const handleAddDoctor = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      const res = await fetch(`${API_BASE}/doctors`, {
+      const res = await apiFetch(`${API_BASE}/doctors`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...newDoc, dept_id: parseInt(newDoc.dept_id), admin_email: ADMIN_EMAIL })
+        body: JSON.stringify({ ...newDoc, dept_id: parseInt(newDoc.dept_id), admin_email: getAdminEmail() })
       });
       if (!res.ok) {
         const errorData = await res.json();
@@ -175,13 +196,13 @@ export const AdminPanel: React.FC = () => {
     e.preventDefault();
     if (!editingDoctor) return;
     try {
-      const res = await fetch(`${API_BASE}/doctors/${editingDoctor.doctor_id}`, {
+      const res = await apiFetch(`${API_BASE}/doctors/${editingDoctor.doctor_id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           ...editingDoctor, 
           dept_id: parseInt(editingDoctor.dept_id),
-          admin_email: ADMIN_EMAIL
+          admin_email: getAdminEmail()
         })
       });
       if (!res.ok) {
@@ -199,7 +220,7 @@ export const AdminPanel: React.FC = () => {
 
   const handleAddRule = async (e: React.FormEvent) => {
     e.preventDefault();
-    await fetch(`${API_BASE}/rules`, {
+    await apiFetch(`${API_BASE}/rules`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(newRule)
@@ -209,10 +230,10 @@ export const AdminPanel: React.FC = () => {
   };
 
   const handleResetClinic = async () => {
-    await fetch(`${API_BASE}/reset-clinic`, {
+    await apiFetch(`${API_BASE}/reset-clinic`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ admin_email: ADMIN_EMAIL })
+      body: JSON.stringify({ admin_email: getAdminEmail() })
     });
     setShowDangerModal(false);
     fetchAllData();
@@ -222,11 +243,11 @@ export const AdminPanel: React.FC = () => {
     e.preventDefault();
     if (!editingPatient) return;
     
-    await fetch(`${API_BASE}/patients/${editingPatient.patient_id}`, {
+    await apiFetch(`${API_BASE}/patients/${editingPatient.patient_id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        admin_email: ADMIN_EMAIL,
+        admin_email: getAdminEmail(),
         updates: {
           phone_number: editingPatient.phone_number,
           full_name: editingPatient.full_name
@@ -292,7 +313,7 @@ export const AdminPanel: React.FC = () => {
 
   const handleExportDB = async () => {
     try {
-      const res = await fetch(`${API_BASE}/export-db`);
+      const res = await apiFetch(`${API_BASE}/export-db`);
       if (!res.ok) throw new Error('Failed to export DB');
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
@@ -366,7 +387,7 @@ export const AdminPanel: React.FC = () => {
             )}
           </div>
           <span className="text-xs sm:text-sm font-semibold text-purple-600 bg-purple-50 px-2.5 sm:px-3 py-1 rounded-full border border-purple-200/30 hidden xs:inline truncate max-w-[180px] sm:max-w-none">
-            Admin: {ADMIN_EMAIL}
+            Admin: {getAdminEmail()}
           </span>
           <LiquidButton onClick={handleExportDB} className="px-3 sm:px-4 py-1.5 sm:py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-white text-xs sm:text-sm font-bold transition flex items-center shadow-lg shadow-emerald-600/20 active:scale-95 cursor-pointer">
             <DownloadCloud className="w-3.5 h-3.5 sm:w-4 sm:h-4 mr-1.5 sm:mr-2" /> Download DB

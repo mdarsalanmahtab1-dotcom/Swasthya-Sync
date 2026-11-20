@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { getApiBaseUrl } from '../config';
 import { AlertCircle, Clock, CheckCircle, User, Activity, Filter, LogOut, RefreshCw } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { apiFetch } from '../lib/api';
 
 interface QueueItem {
   session_id: string;
@@ -26,7 +27,7 @@ export default function Dashboard_Triage() {
 
   const fetchDoctors = async () => {
     try {
-      const res = await fetch(`${getApiBaseUrl()}/api/doctors`);
+      const res = await apiFetch(`${getApiBaseUrl()}/api/doctors`);
       if (res.ok) {
         const data = await res.json();
         if (data.doctors) setDoctors(data.doctors);
@@ -46,7 +47,7 @@ export default function Dashboard_Triage() {
       const url = selectedDoctorId 
         ? `${getApiBaseUrl()}/api/triage/queue?doctor_id=${selectedDoctorId}` 
         : `${getApiBaseUrl()}/api/triage/queue`;
-      const res = await fetch(url);
+      const res = await apiFetch(url);
       if (res.ok) {
         const data = await res.json();
         setQueue(data.queue || []);
@@ -235,7 +236,7 @@ function TriageActionPanel({ item, onUpdate }: { item: QueueItem; onUpdate: () =
   const handleTriageSubmit = async (elevate: boolean) => {
     setIsElevating(true);
     try {
-      await fetch(`${getApiBaseUrl()}/api/session/${item.session_id}/nurse-triage`, {
+      await apiFetch(`${getApiBaseUrl()}/api/session/${item.session_id}/nurse-triage`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

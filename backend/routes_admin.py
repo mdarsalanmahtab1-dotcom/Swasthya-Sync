@@ -4,7 +4,11 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 import database
 
-admin_router = APIRouter(prefix="/api/admin", tags=["admin"])
+from fastapi import Depends
+from routes_extended import require_role
+
+# Every /api/admin/* route requires a server-validated ADMIN token.
+admin_router = APIRouter(prefix="/api/admin", tags=["admin"], dependencies=[Depends(require_role("ADMIN"))])
 
 class DepartmentReq(BaseModel):
     name: str
@@ -80,7 +84,7 @@ async def add_doctor(req: DoctorReq):
     except Exception as e:
         if "UNIQUE constraint failed" in str(e) and "username" in str(e):
             raise HTTPException(status_code=400, detail="Username is already taken. Please choose another one.")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Request failed")
 
 @admin_router.put("/doctors/{doctor_id}")
 async def update_doctor(doctor_id: str, req: DoctorUpdateReq):
@@ -101,7 +105,7 @@ async def update_doctor(doctor_id: str, req: DoctorUpdateReq):
     except Exception as e:
         if "UNIQUE constraint failed" in str(e) and "username" in str(e):
             raise HTTPException(status_code=400, detail="Username is already taken. Please choose another one.")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Request failed")
 
 @admin_router.get("/departments")
 async def get_departments():
@@ -113,7 +117,7 @@ async def add_department(req: DepartmentReq):
         await database.add_department(req.name)
         return {"status": "success"}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Request failed")
 
 @admin_router.put("/departments/{dept_id}/default")
 async def set_default_department(dept_id: int):
@@ -125,7 +129,7 @@ async def set_default_department(dept_id: int):
                 await conn.execute("UPDATE departments SET is_default = TRUE WHERE dept_id = $1", dept_id)
         return {"status": "success"}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail="Request failed")
 
 @admin_router.get("/rules")
 async def get_rules():
