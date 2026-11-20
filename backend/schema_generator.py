@@ -2,7 +2,7 @@
 SwasthyaSync v4 — Dynamic Schema Generator (Stage 1)
 
 Called ONCE per encounter, immediately after chief complaint + demographics.
-Uses a heavy model (Gemini 3.6 Flash) to generate a complaint-specific
+Uses the reasoning cascade (model_config.REASONING_MODELS) to generate a complaint-specific
 clinical interview schema.
 
 Two-call strategy:
@@ -26,15 +26,40 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────
 # Stage 1 Model Cascade — clinical reasoning models for dynamic interview schema
 # ──────────────────────────────────────────────────────────────────────
-SCHEMA_MODELS_CASCADE = [
-    "gemini-3.6-flash",          # High reasoning primary (~2.1s, 0 errors)
-    "gemini-3.1-flash-lite",      # Fast tier-2 backup (~1.5s)
-    "gemini-flash-lite-latest",  # Alias tier-3 backup
-    "gemini-3.5-flash-lite",     # Tier-4 fallback
-]
+import model_config
+
+SCHEMA_MODELS_CASCADE = model_config.REASONING_MODELS  # env: GEMINI_REASONING_MODELS
 
 SCHEMA_MODEL_PRIMARY = SCHEMA_MODELS_CASCADE[0]
-SCHEMA_MODEL_FALLBACK = SCHEMA_MODELS_CASCADE[1]
+SCHEMA_MODEL_FALLBACK = SCHEMA_MODELS_CASCADE[1] if len(SCHEMA_MODELS_CASCADE) > 1 else SCHEMA_MODELS_CASCADE[0]
+
+
+# JSON shape the schema-generation model must return (used as response_json_schema).
+SCHEMA_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "chief_complaint": {"type": "string"},
+        "fields": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "question_intent": {"type": "string"},
+                    "type": {"type": "string"},
+                    "priority": {"type": "string", "enum": ["critical", "high", "medium", "optional"]},
+                    "red_flag": {"type": "boolean"},
+                    "fork_eligible": {"type": "boolean"},
+                    "anchor": {"type": "boolean"},
+                    "category": {"type": "string", "enum": ["HPI", "PMH", "DH", "FH", "SH", "ROS", "red_flag_check"]},
+                    "conditional_on": {"type": ["string", "null"]},
+                },
+                "required": ["id", "question_intent", "type", "priority", "red_flag", "category"],
+            },
+        },
+    },
+    "required": ["chief_complaint", "fields"],
+}
 
 # Language names for demographic context
 LANGUAGE_NAMES = {
@@ -192,29 +217,36 @@ def generate_schema(
 def _call_model_for_schema(model: str, system_prompt: str, user_prompt: str, timeout_seconds: float = 25.0) -> dict | None:
     """Call a specific model for schema generation with timeout protection. Returns None on failure."""
     try:
-        from google import genai
         from google.genai import types as genai_types
-        import os
 
-        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", ""))
+        client = model_config.get_genai_client()
+        if client is None:
+            return None
+
+        def _make_config(schema: dict | None):
+            return genai_types.GenerateContentConfig(**llm_client._json_config_kwargs(
+                system_prompt, 0.3, 4096, schema,
+            ))
+
+        use_schema = llm_client.STRICT_JSON_SCHEMA
+        config_holder = {"config": _make_config(SCHEMA_JSON_SCHEMA if use_schema else None)}
 
         def _invoke():
             return client.models.generate_content(
                 model=model,
                 contents=user_prompt,
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    response_mime_type="application/json",
-                    temperature=0.3,
-                    max_output_tokens=4096,
-                    automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(disable=True),
-                ),
+                config=config_holder["config"],
             )
 
-        if hasattr(llm_client, "_call_model_with_timeout"):
+        try:
             response = llm_client._call_model_with_timeout(_invoke, timeout_seconds=timeout_seconds)
-        else:
-            response = _invoke()
+        except Exception as e:
+            if use_schema and llm_client.is_schema_rejection(e):
+                logger.warning(f"Schema model {model} rejected response_json_schema — retrying without it")
+                config_holder["config"] = _make_config(None)
+                response = llm_client._call_model_with_timeout(_invoke, timeout_seconds=timeout_seconds)
+            else:
+                raise
 
         raw_text = (response.text or "").strip()
         if raw_text.startswith("```json"):
@@ -235,7 +267,7 @@ def _call_model_for_schema(model: str, system_prompt: str, user_prompt: str, tim
             return None
 
     except Exception as e:
-        logger.error(f"Schema generation with {model} failed: {e}")
+        logger.error(f"Schema generation with {model} failed: {type(e).__name__}")
         return None
 
 

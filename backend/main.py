@@ -76,6 +76,9 @@ async def cleanup_stale_sessions():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("SwasthyaSync backend starting...")
+    # Log which configured Gemini models the credentials can see (background, never fails startup)
+    import model_config
+    asyncio.create_task(asyncio.to_thread(model_config.log_visible_models))
     from database import setup_database
     await setup_database()
     _pdf_engine = None

@@ -2,7 +2,7 @@
 SwasthyaSync — Ultra-Low Latency Resilient LLM Client (google.genai SDK)
 
 Features:
-  - Valid Gemini Model Cascade (gemini-2.5-flash -> gemini-1.5-flash)
+  - Gemini model cascades configured in model_config.py (env vars)
   - Circuit Breaker Pattern (fast fail on 503/throttling)
   - Retry with Exponential Backoff
   - Disabled AFC (Automatic Function Calling) to prevent multi-call latency loops
@@ -31,29 +31,20 @@ except ImportError:
     logger.warning("google-genai not installed — using mock LLM")
 
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+import model_config
 
 # ──────────────────────────────────────────────────────────────────────
-# Multi-Tier Resilient Model Cascades
+# Multi-Tier Resilient Model Cascades — defined in model_config.py (env vars)
 # ──────────────────────────────────────────────────────────────────────
 
-# Speed-optimized cascade (for low-latency interactive kiosk turns & portal chat)
-FAST_MODELS_CASCADE = [
-    "gemini-3.1-flash-lite",      # ~1.5s latency, primary (0 errors, no 503)
-    "gemini-3.6-flash",          # ~2.2s latency, high-reasoning tier-2 backup
-    "gemini-flash-lite-latest",  # alias tier-3 backup
-    "gemini-3.5-flash-lite",     # tier-4 backup
-]
+# Speed-optimized cascade (low-latency interactive kiosk turns & portal chat)
+FAST_MODELS_CASCADE = model_config.FAST_MODELS
 
-# Reasoning-optimized cascade (for clinical handover notes, contradictions, synthesis)
-REASONING_MODELS_CASCADE = [
-    "gemini-3.6-flash",          # Deep clinical reasoning, primary (~2.2s)
-    "gemini-3.1-flash-lite",      # Fast tier-2 backup (~1.5s)
-    "gemini-flash-lite-latest",  # alias tier-3 backup
-]
+# Reasoning-optimized cascade (clinical handover notes, contradictions, synthesis)
+REASONING_MODELS_CASCADE = model_config.REASONING_MODELS
 
 PRIMARY_MODEL = FAST_MODELS_CASCADE[0]
-FALLBACK_MODEL = FAST_MODELS_CASCADE[1]
+FALLBACK_MODEL = FAST_MODELS_CASCADE[1] if len(FAST_MODELS_CASCADE) > 1 else FAST_MODELS_CASCADE[0]
 
 # Shared thread pool for timeout-bounded LLM calls
 _llm_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="gemini_worker")
@@ -130,16 +121,34 @@ class CircuitBreaker:
 
 circuit_breaker = CircuitBreaker()
 
-_client_instance = None
-
 def _get_client():
-    global _client_instance
-    if not HAS_GENAI or not GEMINI_API_KEY:
+    """Shared google-genai client (API key or Vertex ADC) — see model_config.get_genai_client."""
+    if not HAS_GENAI:
         return None
-    if _client_instance is None:
-        _client_instance = genai.Client(api_key=GEMINI_API_KEY)
-        logger.info("Gemini client initialized (singleton)")
-    return _client_instance
+    return model_config.get_genai_client()
+
+
+# Constrain JSON outputs with response_json_schema (set GEMINI_STRICT_JSON_SCHEMA=false to disable).
+STRICT_JSON_SCHEMA = os.environ.get("GEMINI_STRICT_JSON_SCHEMA", "true").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _json_config_kwargs(system_prompt: str, temperature: float, max_output_tokens: int, schema: dict | None) -> dict:
+    kwargs = dict(
+        system_instruction=system_prompt,
+        response_mime_type="application/json",
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+        automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(disable=True),
+    )
+    if schema is not None:
+        kwargs["response_json_schema"] = schema
+    return kwargs
+
+
+def is_schema_rejection(e: Exception) -> bool:
+    """True if the API refused the request itself (HTTP 400), e.g. an unsupported schema keyword."""
+    code = getattr(e, "code", None) or getattr(e, "status_code", None)
+    return code == 400 or "INVALID_ARGUMENT" in str(e)[:300]
 
 
 def _generate_json_with_retry(
@@ -149,54 +158,62 @@ def _generate_json_with_retry(
     temperature: float = 0.3,
     models_to_try: list[str] | None = None,
     timeout_seconds: float = 7.0,
+    response_json_schema: dict | None = None,
+    max_output_tokens: int = 1024,
 ) -> dict:
-    """Call Gemini with model cascade fallback, timeout protection, and disabled AFC."""
+    """Call Gemini with model cascade fallback, timeout protection, and disabled AFC.
+
+    If response_json_schema is given, the model is constrained to that JSON shape.
+    """
     if not circuit_breaker.allow_request():
         raise RuntimeError("Circuit breaker is OPEN — bypassing LLM call for immediate fallback")
 
     candidate_models = list(models_to_try or FAST_MODELS_CASCADE)
     last_exception = None
+    use_schema = response_json_schema is not None and STRICT_JSON_SCHEMA
 
     for model in candidate_models:
-        t0 = time.time()
-        try:
-            config = genai_types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                response_mime_type="application/json",
-                temperature=temperature,
-                max_output_tokens=1024,
-                automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(disable=True),
-            )
+        attempts = 2 if use_schema else 1
+        for attempt in range(attempts):
+            with_schema = use_schema and attempt == 0
+            t0 = time.time()
+            try:
+                config = genai_types.GenerateContentConfig(**_json_config_kwargs(
+                    system_prompt, temperature, max_output_tokens,
+                    response_json_schema if with_schema else None,
+                ))
 
-            def _invoke():
-                return client.models.generate_content(
-                    model=model,
-                    contents=user_prompt,
-                    config=config,
-                )
+                def _invoke():
+                    return client.models.generate_content(
+                        model=model,
+                        contents=user_prompt,
+                        config=config,
+                    )
 
-            response = _call_model_with_timeout(_invoke, timeout_seconds=timeout_seconds)
-            elapsed = time.time() - t0
-            logger.info(f"Gemini call took {elapsed:.2f}s (model={model})")
+                response = _call_model_with_timeout(_invoke, timeout_seconds=timeout_seconds)
+                elapsed = time.time() - t0
+                logger.info(f"Gemini call took {elapsed:.2f}s (model={model}, schema={with_schema})")
 
-            parsed = json.loads(response.text)
-            circuit_breaker.record_success()
-            return parsed
+                parsed = json.loads(response.text)
+                circuit_breaker.record_success()
+                return parsed
 
-        except concurrent.futures.TimeoutError:
-            elapsed = time.time() - t0
-            logger.warning(f"⚡ Gemini model {model} timed out after {elapsed:.2f}s (limit {timeout_seconds}s) — cascading to next backup")
-            last_exception = TimeoutError(f"Model {model} timed out after {timeout_seconds}s")
-            continue
+            except concurrent.futures.TimeoutError:
+                elapsed = time.time() - t0
+                logger.warning(f"⚡ Gemini model {model} timed out after {elapsed:.2f}s (limit {timeout_seconds}s) — cascading to next backup")
+                last_exception = TimeoutError(f"Model {model} timed out after {timeout_seconds}s")
+                break
 
-        except Exception as e:
-            elapsed = time.time() - t0
-            err_msg = str(e)
-            last_exception = e
-            logger.warning(f"⚡ Gemini model {model} failed after {elapsed:.2f}s: {err_msg[:100]} — cascading to next backup")
-            continue
+            except Exception as e:
+                elapsed = time.time() - t0
+                last_exception = e
+                if with_schema and is_schema_rejection(e):
+                    logger.warning(f"⚡ Gemini model {model} rejected response_json_schema — retrying without schema")
+                    continue
+                logger.warning(f"⚡ Gemini model {model} failed after {elapsed:.2f}s: {type(e).__name__} — cascading to next backup")
+                break
 
-    circuit_breaker.record_failure(str(last_exception)[:80])
+    circuit_breaker.record_failure(type(last_exception).__name__ if last_exception else "unknown")
     raise last_exception or RuntimeError("All Gemini backup models failed")
 
 
@@ -241,7 +258,7 @@ def generate_portal_chat_reply(system_prompt: str, user_prompt: str, temperature
             logger.warning(f"⚡ Portal chat failed on {model}: {e} — cascading to next backup")
             continue
 
-    circuit_breaker.record_failure(str(last_exception)[:80])
+    circuit_breaker.record_failure(type(last_exception).__name__ if last_exception else "unknown")
     return "I apologize, but I encountered an error while processing your request. Please ask your doctor for specific medical advice."
 
 
@@ -253,6 +270,7 @@ def conversation_turn(
     system_prompt: str,
     user_prompt: str,
     temperature: float = 0.4,
+    response_json_schema: dict | None = None,
 ) -> dict:
     """Execute a single conversation turn via LLM with fallback protection."""
     client = _get_client()
@@ -260,9 +278,12 @@ def conversation_turn(
         return _mock_conversation_turn(user_prompt)
 
     try:
-        return _generate_json_with_retry(client, system_prompt, user_prompt, temperature)
+        return _generate_json_with_retry(
+            client, system_prompt, user_prompt, temperature,
+            response_json_schema=response_json_schema,
+        )
     except Exception as e:
-        logger.error(f"conversation_turn failed gracefully: {e}")
+        logger.error(f"conversation_turn failed gracefully: {type(e).__name__}")
         return _mock_conversation_turn(user_prompt)
 
 
@@ -357,30 +378,89 @@ Only extract what is clearly present. Mark uncertain extractions."""
             temperature=0.1,
             models_to_try=REASONING_MODELS_CASCADE,
             timeout_seconds=10.0,
+            response_json_schema=DOC_ENTITIES_JSON_SCHEMA,
         )
     except Exception as e:
-        logger.error(f"LLM extract_document_entities failed: {e}")
+        logger.error(f"LLM extract_document_entities failed: {type(e).__name__}")
         return _mock_doc_extract(ocr_text)
 
 
+DOC_ENTITIES_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "medications": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "dose": {"type": "string"},
+                    "frequency": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        },
+        "diagnoses": {"type": "array", "items": {"type": "string"}},
+        "lab_results": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "test": {"type": "string"},
+                    "result": {"type": "string"},
+                    "unit": {"type": "string"},
+                    "reference_range": {"type": "string"},
+                    "status": {"type": "string"},
+                },
+                "required": ["test", "result"],
+            },
+        },
+        "procedures": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["medications", "diagnoses", "lab_results", "procedures"],
+}
+
+
 def _mock_doc_extract(ocr_text: str) -> dict:
-    """Mock document extraction for demos without LLM."""
+    """AI unavailable: return NOTHING extracted. Never invent clinical data."""
     return {
-        "medications": [
-            {"name": "Paracetamol", "dose": "500 mg", "frequency": "Twice a day"},
-            {"name": "Amlodipine", "dose": "5 mg", "frequency": "Once daily"},
-        ],
-        "diagnoses": ["Hypertension"],
-        "lab_results": [
-            {"test": "Hemoglobin", "result": "13.2", "unit": "g/dL", "reference_range": "13.0-17.0", "status": "Normal"},
-            {"test": "WBC Count", "result": "8200", "unit": "/μL", "reference_range": "4000-11000", "status": "Normal"},
-        ],
+        "medications": [],
+        "diagnoses": [],
+        "lab_results": [],
         "procedures": [],
+        "ai_unavailable": True,
     }
 
 # ──────────────────────────────────────────────────────────────────────
 # Clinical Synthesis
 # ──────────────────────────────────────────────────────────────────────
+
+# Keys that identify a person (or point to their files) and must never be sent to an LLM.
+# Note: a plain "name" key is NOT stripped globally (medications use it for the drug name);
+# it is stripped only inside person objects (_PERSON_KEYS).
+_IDENTIFIER_KEYS = {
+    "patient_name", "full_name", "extracted_name_on_document", "registered_name",
+    "phone", "phone_number", "mobile", "mobile_number", "abha", "abha_number", "abha_id",
+    "abha_address", "address", "email", "aadhaar", "file_path", "storage_path", "image_url",
+    "signed_url", "storage_paths", "uploaded_images",
+}
+_PERSON_KEYS = {"patient_context", "patient", "demographics", "patient_info"}
+
+
+def strip_identifiers(obj, _in_person: bool = False):
+    """Return a deep copy of obj with identifier keys removed (recursively)."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            kl = str(k).lower()
+            if kl in _IDENTIFIER_KEYS or (_in_person and kl == "name"):
+                continue
+            out[k] = strip_identifiers(v, _in_person=kl in _PERSON_KEYS)
+        return out
+    if isinstance(obj, list):
+        return [strip_identifiers(v, _in_person=_in_person) for v in obj]
+    return obj
+
 
 def generate_clinical_summary(filled_state: dict, doc_extractions: list = None) -> dict:
     """Synthesize the Q&A state into a structured 200-word clinical narrative."""
@@ -398,7 +478,10 @@ Output JSON format:
 }
 Keep it objective and medically accurate."""
 
-    user_prompt = f"Patient Q&A History:\n{json.dumps(filled_state, indent=2)}\n\nDocument Extractions:\n{json.dumps(doc_extractions or [], indent=2)}"
+    # Privacy: drop direct identifiers (names, phone, ABHA, address, file paths) before the LLM sees them.
+    safe_state = strip_identifiers(filled_state)
+    safe_docs = strip_identifiers(doc_extractions or [])
+    user_prompt = f"Patient Q&A History:\n{json.dumps(safe_state, indent=2, ensure_ascii=False)}\n\nDocument Extractions:\n{json.dumps(safe_docs, indent=2, ensure_ascii=False)}"
     
     try:
         return _generate_json_with_retry(
@@ -408,16 +491,31 @@ Keep it objective and medically accurate."""
             temperature=0.2,
             models_to_try=REASONING_MODELS_CASCADE,
             timeout_seconds=10.0,
+            response_json_schema=CLINICAL_SUMMARY_JSON_SCHEMA,
         )
     except Exception as e:
-        logger.error(f"LLM generate_clinical_summary failed: {e}")
+        logger.error(f"LLM generate_clinical_summary failed: {type(e).__name__}")
         return _mock_clinical_summary(filled_state)
 
 
+CLINICAL_SUMMARY_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "clinical_narrative": {"type": "string"},
+        "critical_highlights": {"type": "array", "items": {"type": "string"}},
+        "contradictions": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["clinical_narrative", "critical_highlights", "contradictions"],
+}
+
+AI_UNAVAILABLE_NARRATIVE = "AI summary unavailable — please review the raw Q&A below."
+
+
 def _mock_clinical_summary(filled_state: dict) -> dict:
-    """Mock clinical summary."""
+    """AI unavailable: say so plainly. Never invent a clinical summary."""
     return {
-        "clinical_narrative": "Patient presents with reported symptoms in the provided history. Vital signs and physical examination required for further assessment.",
-        "critical_highlights": ["Awaiting detailed clinical evaluation", "Review provided symptom history"],
-        "contradictions": []
+        "clinical_narrative": AI_UNAVAILABLE_NARRATIVE,
+        "critical_highlights": [],
+        "contradictions": [],
+        "ai_unavailable": True,
     }

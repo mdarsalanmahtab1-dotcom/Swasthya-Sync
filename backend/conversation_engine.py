@@ -120,8 +120,11 @@ def extract_from_response(
 Extract any field values from the patient's latest message."""
 
     try:
-        result = llm_client.conversation_turn(system_prompt, user_prompt, temperature=0.1)
-        extracted = result.get("extracted_fields", {})
+        result = llm_client.conversation_turn(
+            system_prompt, user_prompt, temperature=0.1,
+            response_json_schema=EXTRACTION_JSON_SCHEMA,
+        )
+        extracted = result.get("extracted_fields", {}) or {}
         
         # Validate: only accept fields that are in our unfilled list
         valid_field_ids = {f["id"] for f in unfilled_fields}
@@ -423,6 +426,40 @@ Generate your question about: {question_intent}"""
 # OPENING QUESTION — for the very first turn (chief complaint)
 # ──────────────────────────────────────────────────────────────────────
 
+# JSON shape for field extraction. Field IDs are dynamic (from the generated schema),
+# so each extracted field is an additionalProperties entry.
+EXTRACTION_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "extracted_fields": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "object",
+                "properties": {
+                    "value": {"type": "string"},
+                    "verbatim": {"type": "string"},
+                    "confidence": {"type": "number"},
+                },
+                "required": ["value", "verbatim", "confidence"],
+            },
+        },
+    },
+    "required": ["extracted_fields"],
+}
+
+
+def _fill_name_placeholder(text: str, patient_name: str) -> str:
+    """Replace the {{NAME}} placeholder with the real name (or remove it) in Python."""
+    import re as _re
+    name = (patient_name or "").strip()
+    text = text or ""
+    if name:
+        return _re.sub(r"\{\{\s*NAME\s*\}\}", lambda _m: name, text)
+    # No name: drop the placeholder and tidy leftover punctuation/space
+    text = _re.sub(r"[ ,]*\{\{\s*NAME\s*\}\}", "", text)
+    return _re.sub(r"\s{2,}", " ", text).strip()
+
+
 def generate_opening_question(
     language: str,
     patient_name: str = "",
@@ -434,8 +471,10 @@ def generate_opening_question(
     """Generate the opening chief complaint question."""
     language_name = LANGUAGE_NAMES.get(language, "English")
 
-    name_str = f" {patient_name}" if patient_name else ""
-    
+    # Privacy: the patient's name is NEVER sent to the model. The model writes the
+    # literal placeholder {{NAME}} and we substitute the real name here in Python.
+    has_name = bool((patient_name or "").strip())
+
     if language == "en-IN":
         lang_rule = "Respond in simple, clear English."
     else:
@@ -454,7 +493,7 @@ Instead of a generic "what brings you here", ask how they are doing since their 
 {lang_rule}
 
 Generate a warm opening question to ask the patient what brings them here today.
-{"Address them as " + name_str + "." if name_str else ""}
+{"Address the patient by name using the literal placeholder {{NAME}} exactly once (do not translate or transliterate it; it will be replaced with their real name)." if has_name else "Do not address the patient by name."}
 {follow_up_prompt}
 {"DOCTOR'S CUSTOM INSTRUCTIONS FOR INTERVIEW: " + doctor_custom_instructions if doctor_custom_instructions else ""}
 
@@ -473,8 +512,9 @@ Include 5-8 common complaint options like: Fever, Pain, Cough, Stomach problem, 
 
     try:
         result = llm_client.conversation_turn(system_prompt, user_prompt, temperature=0.3)
+        spoken = _fill_name_placeholder(result.get("spoken_text", "What brings you here today?"), patient_name)
         return ConversationResult({
-            "spoken_text": result.get("spoken_text", "What brings you here today?"),
+            "spoken_text": spoken,
             "suggested_options": result.get("suggested_options", _fallback_options(language_name)),
             "extracted_fields": {},
             "red_flag_check": None,

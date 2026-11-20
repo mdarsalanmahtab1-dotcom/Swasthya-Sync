@@ -1017,6 +1017,9 @@
                     <span class="badge-origin">AI Kiosk Synthesized Intake</span>
                 </div>
                 <div class="box-content">
+                    {% if ai_summary.ai_unavailable %}
+                        <p class="narrative-paragraph" style="display:inline-block;padding:4px 10px;border:1.5px solid #b45309;border-radius:6px;background:#fef3c7;color:#92400e;font-weight:700;">&#9888; AI unavailable — verify manually</p>
+                    {% endif %}
                     {% if ai_summary.clinical_narrative %}
                         <p class="narrative-paragraph">{{ ai_summary.clinical_narrative }}</p>
                     {% elif ai_summary.Narrative %}

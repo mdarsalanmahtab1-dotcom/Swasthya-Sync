@@ -19,16 +19,27 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+import model_config
 
-# Multimodal Model Cascade for Batch Document & Prescription OCR
-OCR_MODELS_CASCADE = [
-    "gemini-3.6-flash",          # Superior vision & clinical reasoning for prescriptions/labs
-    "gemini-3.1-flash-lite",      # Fast multimodal backup (~1.5s)
-    "gemini-flash-lite-latest",  # Dynamic alias backup
-    "gemini-3.5-flash-lite",     # Tier-4 fallback
-]
+# Shared google-genai client (API key or Vertex ADC) — see model_config.py
+client = model_config.get_genai_client()
+
+# Multimodal model cascade for batch document & prescription OCR (env: GEMINI_VISION_MODELS)
+OCR_MODELS_CASCADE = model_config.VISION_MODELS
+
+# Privacy: by default the registered patient name is NOT sent to the model.
+# The model only reads the name printed on the document; matching happens in Python
+# (match_patient_name below). Set OCR_NAME_MATCH_MODE=llm to restore model-side matching.
+OCR_NAME_MATCH_MODE = (os.environ.get("OCR_NAME_MATCH_MODE", "python") or "python").strip().lower()
+
+_WITHHELD_NAME = "[WITHHELD FOR PRIVACY]"
+_PRIVACY_OVERRIDE = """PRIVACY OVERRIDE (takes precedence over every rule below):
+The registered patient name is WITHHELD and shown as [WITHHELD FOR PRIVACY].
+Do NOT perform any name matching. ALWAYS set "name_match" to null.
+Still copy the patient name printed on the document into "extracted_name_on_document" exactly as written (or null if absent/unreadable).
+Do NOT use "patient name clearly conflicts" as a rejection_reason. Identity matching is done downstream.
+
+"""
 
 # ------------------------------------------------------------------
 # 1. New Prompt & Models for Batch OCR & Validation
@@ -1279,6 +1290,80 @@ class BatchExtractionResponse(BaseModel):
     consolidated_summary: ConsolidatedSummary
 
 # ------------------------------------------------------------------
+# Name matching in Python (so the registered name never reaches the model)
+# ------------------------------------------------------------------
+import re as _re
+import unicodedata as _ud
+from difflib import SequenceMatcher as _SM
+
+_HONORIFICS = {"mr", "mrs", "ms", "miss", "smt", "shri", "sri", "shrimati", "dr", "master",
+               "baby", "kumari", "km", "late", "sh", "mst", "begum"}
+_MD_VARIANTS = {"md", "mohd", "mohammad", "mohammed", "muhammad", "mohamed", "muhammed"}
+
+
+def _name_tokens(name: str) -> list[str]:
+    name = _ud.normalize("NFKD", name or "")
+    name = "".join(ch for ch in name if not _ud.combining(ch)).lower()
+    name = _re.sub(r"[^\w\s]", " ", name)
+    toks = []
+    for t in name.split():
+        if t in _HONORIFICS:
+            continue
+        toks.append("md" if t in _MD_VARIANTS else t)
+    return toks
+
+
+def _is_latin(tokens: list[str]) -> bool:
+    return all(_re.fullmatch(r"[a-z0-9]+", t) for t in tokens)
+
+
+def _similar(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    if min(len(a), len(b)) < 3:
+        return False
+    return _SM(None, a, b).ratio() >= 0.8
+
+
+def match_patient_name(registered: str | None, on_document: str | None) -> Optional[bool]:
+    """Conservative name match. True = same person, False = clearly different,
+    None = cannot determine (missing/unreadable/other script/too little evidence)."""
+    reg, doc = _name_tokens(registered or ""), _name_tokens(on_document or "")
+    if not reg or not doc or registered in (None, "", "Unknown", "Unknown Patient"):
+        return None
+    if not (_is_latin(reg) and _is_latin(doc)):
+        return None  # different scripts — don't guess
+
+    reg_left = list(reg)
+    full_matches = 0
+    doc_initials: list[str] = []
+    doc_unmatched_full: list[str] = []
+    for t in doc:
+        if len(t) == 1:
+            doc_initials.append(t)
+            continue
+        hit = next((r for r in reg_left if len(r) > 1 and _similar(t, r)), None)
+        if hit:
+            reg_left.remove(hit)
+            full_matches += 1
+        else:
+            doc_unmatched_full.append(t)
+
+    if full_matches == 0 or doc_unmatched_full:
+        return False  # e.g. "Rahul Das" vs "Rahul Kumar"
+    for ini in doc_initials:
+        hit = next((r for r in reg_left if r[0] == ini), None)
+        if hit is None:
+            return False  # initial conflicts with every remaining name part
+        reg_left.remove(hit)
+        if full_matches < 2:
+            return None  # "A. Kumar" vs "Anil Kumar": not enough evidence either way
+    if reg_left and full_matches < 2:
+        return None  # only a first name matched — insufficient
+    return True
+
+
+# ------------------------------------------------------------------
 # 2. Main Method
 # ------------------------------------------------------------------
 
@@ -1291,7 +1376,10 @@ async def process_batch_ocr(image_bytes_list: List[bytes], media_types: List[str
         logger.error("GEMINI_API_KEY not set.")
         return {"doc_id": "mock", "is_valid_medical_document": False, "rejection_reason": "No API key"}
 
-    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(patient_name=patient_name or "Unknown")
+    if OCR_NAME_MATCH_MODE == "llm":
+        system_prompt = SYSTEM_PROMPT_TEMPLATE.format(patient_name=patient_name or "Unknown")
+    else:
+        system_prompt = _PRIVACY_OVERRIDE + SYSTEM_PROMPT_TEMPLATE.format(patient_name=_WITHHELD_NAME)
 
     contents = []
     for img_bytes, mtype in zip(image_bytes_list, media_types):
@@ -1328,19 +1416,26 @@ async def process_batch_ocr(image_bytes_list: List[bytes], media_types: List[str
             continue
         except Exception as e:
             last_err = str(e)
-            logger.warning(f"⚡ Batch OCR failed on {model_name}: {e} — cascading to backup")
+            logger.warning(f"⚡ Batch OCR failed on {model_name}: {type(e).__name__} — cascading to backup")
             continue
 
     if parsed:
             # Map back to old expected DigitizedDocument format at the top level
             # so we don't break main.py or DB
+            name_match = parsed.name_match
+            rejection_reason = parsed.rejection_reason
+            if OCR_NAME_MATCH_MODE != "llm":
+                name_match = match_patient_name(patient_name, parsed.extracted_name_on_document)
+                if name_match is False and parsed.is_valid_medical_document:
+                    rejection_reason = "patient name clearly conflicts with the registered patient name"
+
             legacy_dict = {
                 "doc_id": str(uuid.uuid4())[:8],
                 "document_type": "batch_upload",
                 "is_valid_medical_document": parsed.is_valid_medical_document,
-                "name_match": parsed.name_match,
+                "name_match": name_match,
                 "extracted_name_on_document": parsed.extracted_name_on_document,
-                "rejection_reason": parsed.rejection_reason,
+                "rejection_reason": rejection_reason,
                 
                 # Top level mapping of meds and labs for DB compatibility
                 "medications": [],

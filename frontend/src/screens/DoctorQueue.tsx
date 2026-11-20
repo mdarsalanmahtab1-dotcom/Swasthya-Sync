@@ -6,6 +6,20 @@ import { Stethoscope, ArrowRight, User, LogOut, Coffee, CheckCircle, Settings, X
 import { motion, AnimatePresence } from 'framer-motion';
 import { getApiBaseUrl } from '../config';
 
+// True when the backend could not get an AI summary (it then sends no invented data).
+const isAiUnavailable = (s: any): boolean => {
+  if (!s) return false;
+  let full = s.full_detailed_summary;
+  if (typeof full === 'string') {
+    try { full = JSON.parse(full); } catch { full = null; }
+  }
+  return Boolean(
+    s.ai_unavailable ||
+    full?.ai_unavailable ||
+    (typeof s.small_summary === 'string' && s.small_summary.startsWith('AI summary unavailable'))
+  );
+};
+
 export const DoctorQueue: React.FC = () => {
   const [queue, setQueue] = useState<any[]>([]);
   const [doctorAuth, setDoctorAuth] = useState<any>(() => {
@@ -548,6 +562,14 @@ export const DoctorQueue: React.FC = () => {
                       <div className="p-4 bg-blue-50 rounded-2xl border border-blue-200">
                         <p className="text-xs font-bold text-blue-700 uppercase tracking-wider mb-1">Chief Complaint</p>
                         <p className="text-base font-semibold text-blue-900">{summaryData.chief_complaint}</p>
+                      </div>
+                    )}
+
+                    {/* AI unavailable — never show invented data; tell the doctor to verify */}
+                    {isAiUnavailable(summaryData) && (
+                      <div role="alert" className="flex items-center gap-2 p-3 bg-amber-50 rounded-2xl border-2 border-amber-400">
+                        <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0" />
+                        <p className="text-sm font-bold text-amber-800">AI unavailable — verify manually</p>
                       </div>
                     )}
 
