@@ -14,7 +14,8 @@ import { useEffect, useCallback, useRef, useState, useMemo } from 'react';
 import { Mic, TriangleAlert, SkipForward, Volume2, VolumeX, Send, ArrowLeft, Loader2, Globe, Bot, User, Sparkles, X, ChevronDown } from 'lucide-react';
 import { AbstractOrb } from '../components/AbstractOrb';
 import type { OrbState } from '../components/AbstractOrb';
-import type { UIInstruction } from '../hooks/useConversation';
+import type { UIInstruction, LiveState } from '../hooks/useConversation';
+import { livePlayer, liveMic } from '../lib/liveAudio';
 import { useSarvamSTT } from '../hooks/useSarvamSTT';
 import { useSarvamTTS } from '../hooks/useSarvamTTS';
 import { useWordTyping } from '../hooks/useWordTyping';
@@ -47,6 +48,22 @@ interface Props {
   onSkip: () => void;
   onBack: () => void;
   onRedflag: () => void;
+  // Gemini Live voice path (falls back to Gemini STT/TTS when not active)
+  liveState?: LiveState;
+  startLive?: (resume?: boolean) => void;
+  sendRaw?: (data: object) => void;
+}
+
+const VOICE_MODE = (import.meta.env.VITE_VOICE_MODE as string | undefined) || 'live';
+
+function useLiveAudioState() {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const u1 = livePlayer.subscribe(() => force((n) => n + 1));
+    const u2 = liveMic.subscribe(() => force((n) => n + 1));
+    return () => { u1(); u2(); };
+  }, []);
+  return { livePlaying: livePlayer.playing, liveRecording: liveMic.recording, liveLevel: liveMic.level };
 }
 
 export function Screen3_ConversationalIntake({
@@ -58,9 +75,42 @@ export function Screen3_ConversationalIntake({
   onSkip,
   onBack,
   onRedflag,
+  liveState = 'off',
+  startLive,
+  sendRaw,
 }: Props) {
   const { t } = useTranslation();
   const { speak, stop: stopTTS, isSpeaking } = useSarvamTTS();
+  const { livePlaying, liveRecording, liveLevel } = useLiveAudioState();
+  const liveActive = liveState === 'active' && !!sendRaw;
+  const liveStartedRef = useRef(false);
+
+  // Start Gemini Live once the conversation screen is up (unless disabled with VITE_VOICE_MODE=legacy)
+  useEffect(() => {
+    if (VOICE_MODE === 'legacy' || !startLive || liveStartedRef.current) return;
+    if (ui.screen === 'conversation' && liveState === 'off') {
+      liveStartedRef.current = true;
+      livePlayer.unlock();
+      startLive();
+    }
+  }, [ui.screen, liveState, startLive]);
+
+  // After a fallback, retry Live once when the next question arrives (that question is spoken by
+  // TTS; Live takes over from the following turn). Keeps one bad network moment from costing
+  // the whole interview its low-latency voice.
+  const liveRetriesRef = useRef(0);
+  const fallbackPromptRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (VOICE_MODE === 'legacy' || !startLive || liveState !== 'fallback' || ui.screen !== 'conversation') return;
+    if (fallbackPromptRef.current === null) {
+      fallbackPromptRef.current = ui.prompt || '';
+      return;
+    }
+    if (liveRetriesRef.current < 1 && ui.prompt && ui.prompt !== fallbackPromptRef.current) {
+      liveRetriesRef.current += 1;
+      startLive(true);
+    }
+  }, [liveState, ui.prompt, ui.screen, startLive]);
   const [inputText, setInputText] = useState('');
   const [leftPanelTab, setLeftPanelTab] = useState<'transcript' | 'all_fields'>('transcript');
   const [checklistModalOpen, setChecklistModalOpen] = useState(false);
@@ -123,16 +173,18 @@ export function Screen3_ConversationalIntake({
 
   // Auto-TTS: speak the prompt whenever a new one arrives
   useEffect(() => {
+    const liveSpeaks = ui.voice === 'live' || liveState === 'starting' || liveState === 'active';
     if (
       ui.prompt &&
       !isProcessing &&
+      !liveSpeaks &&
       ui.prompt !== lastSpokenPromptRef.current
     ) {
       lastSpokenPromptRef.current = ui.prompt;
       const textToSpeak = ui.ack ? `${ui.ack}. ${ui.prompt}` : ui.prompt;
       speak(textToSpeak, ui.language || 'hi-IN');
     }
-  }, [ui.prompt, ui.ack, ui.language, isProcessing, speak]);
+  }, [ui.prompt, ui.ack, ui.voice, ui.language, isProcessing, speak, liveState]);
 
   // Auto-scroll chat on updates, speech typing, or recording
   useEffect(() => {
@@ -143,16 +195,34 @@ export function Screen3_ConversationalIntake({
     e.preventDefault();
     stopTTS();
     cancelVoiceTyping();
+    if (liveActive && sendRaw) {
+      // Gemini Live: stream the mic while the button is held (barge-in stops Live's voice)
+      livePlayer.stop();
+      sendRaw({ type: 'audio_start' });
+      try {
+        await liveMic.start((b64) => sendRaw({ type: 'audio', data: b64 }));
+      } catch (err) {
+        console.error('[Live] Mic unavailable, using standard recording', err);
+        sendRaw({ type: 'audio_end' });
+        await startRecording(e);
+      }
+      return;
+    }
     await startRecording(e);
-  }, [startRecording, stopTTS, cancelVoiceTyping]);
+  }, [startRecording, stopTTS, cancelVoiceTyping, liveActive, sendRaw]);
 
   const handleMicRelease = useCallback((e: React.MouseEvent | React.TouchEvent) => {
     e.preventDefault();
+    if (liveMic.recording && sendRaw) {
+      void liveMic.stop().then(() => sendRaw({ type: 'audio_end' }));
+      return;
+    }
     stopRecording(e);
-  }, [stopRecording]);
+  }, [stopRecording, sendRaw]);
 
   const handleOptionTap = useCallback((opt: { label: string; value?: string }) => {
     stopTTS();
+    livePlayer.stop();
     cancelVoiceTyping();
     const backendValue = opt.value || opt.label;
     onTap(backendValue);
@@ -168,14 +238,15 @@ export function Screen3_ConversationalIntake({
   }, [inputText, stopTTS, onVoice, ui.language, cancelVoiceTyping]);
 
   const progress = ui.progress;
-  const effectiveOrbState: OrbState = isRecording
+  const anyRecording = isRecording || liveRecording;
+  const effectiveOrbState: OrbState = anyRecording
     ? 'listening'
     : isTranscribing || isTypingVoice
     ? 'processing'
-    : isSpeaking
+    : isSpeaking || livePlaying
     ? 'speaking'
     : orbState;
-  const micRingOpacity = isRecording ? Math.min(audioLevel * 2, 1) : 0;
+  const micRingOpacity = isRecording ? Math.min(audioLevel * 2, 1) : liveRecording ? Math.min(liveLevel * 4, 1) : 0;
 
   const renderPanelContent = () => (
     <>
@@ -289,7 +360,7 @@ export function Screen3_ConversationalIntake({
 
             {/* LIVE VOICE INPUT STREAMING & TYPING BUBBLE */}
             <AnimatePresence>
-              {isRecording && (
+              {anyRecording && (
                 <motion.div
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -629,7 +700,7 @@ export function Screen3_ConversationalIntake({
                   <span>SPEAKING</span>
                 </motion.div>
               )}
-              {isRecording && (
+              {anyRecording && (
                 <motion.div 
                   initial={{ opacity: 0, y: 4, scale: 0.9 }}
                   animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -717,7 +788,7 @@ export function Screen3_ConversationalIntake({
                     key={idx}
                     id={`option-${idx}`}
                     onClick={() => handleOptionTap(opt as any)}
-                    disabled={isProcessing || isRecording || isTranscribing || isTypingVoice}
+                    disabled={isProcessing || anyRecording || isTranscribing || isTypingVoice}
                     className={`flex items-center gap-2.5 xs:gap-3.5 px-3.5 py-2.5 xs:px-5 xs:py-3 sm:px-6 sm:py-3.5 bg-white border-2 ${visual.badgeBorder} rounded-2xl hover:shadow-card-hover active:scale-[0.97] transition-[transform,box-shadow,border-color,background-color] duration-150 text-left shadow-card border-b-4 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer min-h-[50px] xs:min-h-[56px] min-w-[135px] xs:min-w-[160px] sm:min-w-[210px] flex-1 max-w-[340px]`}
                   >
                     <span className="text-xl xs:text-2xl sm:text-3xl shrink-0 select-none leading-none">
@@ -754,7 +825,7 @@ export function Screen3_ConversationalIntake({
                 type="text" 
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
-                disabled={isProcessing || isRecording || isTranscribing || isTypingVoice}
+                disabled={isProcessing || anyRecording || isTranscribing || isTypingVoice}
                 placeholder={isTypingVoice ? "Typing recognized speech..." : t('interview.type_response')}
                 className="w-full bg-transparent border-none text-xs xs:text-sm sm:text-base font-semibold text-slate-800 focus:outline-none disabled:opacity-50 placeholder:text-slate-400"
               />
@@ -762,7 +833,7 @@ export function Screen3_ConversationalIntake({
             <LiquidButton 
               type="submit" 
               aria-label="Send message"
-              disabled={isProcessing || isRecording || isTranscribing || isTypingVoice || !inputText.trim()}
+              disabled={isProcessing || anyRecording || isTranscribing || isTypingVoice || !inputText.trim()}
               className="absolute right-1 top-1 bottom-1 aspect-square flex items-center justify-center bg-blue-600 text-white rounded-full hover:bg-blue-700 disabled:opacity-40 disabled:bg-slate-200 disabled:text-slate-400 transition-[background-color,transform] duration-150 active:scale-[0.97] cursor-pointer shadow-xs"
             >
               <Send className="w-3.5 h-3.5 xs:w-4 xs:h-4" />
@@ -815,14 +886,14 @@ export function Screen3_ConversationalIntake({
                   onTouchCancel={handleMicRelease}
                   disabled={isProcessing || isTranscribing || isTypingVoice}
                   className={`relative flex items-center justify-center gap-1.5 xs:gap-2 px-3.5 xs:px-5 sm:px-8 py-2 xs:py-2.5 sm:py-3 rounded-full font-extrabold text-white transition-[transform,box-shadow,background-color] duration-150 active:scale-[0.97] shadow-card-hover text-xs sm:text-base ${
-                    isRecording
+                    anyRecording
                       ? 'bg-red-600 shadow-red-600/40 scale-102 animate-pulse'
                       : isTranscribing || isTypingVoice
                       ? 'bg-blue-600/90 shadow-blue-600/30'
                       : 'bg-gradient-to-r from-blue-600 to-indigo-600 shadow-blue-600/25 hover:from-blue-700 hover:to-indigo-700'
                   } disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer shrink-0 min-w-[130px] xs:min-w-[150px] sm:min-w-[190px]`}
                 >
-                  {isRecording ? (
+                  {anyRecording ? (
                     <>
                       <Mic className="w-3.5 h-3.5 xs:w-4 xs:h-4 sm:w-5 sm:h-5 text-white animate-bounce" />
                       <span>{t('interview.release_to_send')}</span>

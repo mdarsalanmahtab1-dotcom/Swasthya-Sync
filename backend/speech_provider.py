@@ -309,9 +309,26 @@ def speech_to_text(audio_bytes: bytes, hint_language: str = "hi-IN", fmt: str = 
         return _stt_result("", hint_language, "Speech recognition unavailable")
 
 
+# The brand name written in Latin letters inside an Indic sentence gets spelled out letter by
+# letter by TTS voices ("S W A S T H Y A…"). Speak it in the sentence's own script instead.
+_BRAND_SPOKEN = {
+    "hi-IN": "स्वास्थ्य सिंक", "mr-IN": "स्वास्थ्य सिंक", "bn-IN": "স্বাস্থ্য সিঙ্ক",
+    "gu-IN": "સ્વાસ્થ્ય સિંક", "pa-IN": "ਸਵਾਸਥ ਸਿੰਕ", "or-IN": "ସ୍ୱାସ୍ଥ୍ୟ ସିଙ୍କ",
+    "ta-IN": "ஸ்வாஸ்த்ய சிங்க்", "te-IN": "స్వాస్థ్య సింక్", "kn-IN": "ಸ್ವಾಸ್ಥ್ಯ ಸಿಂಕ್",
+    "ml-IN": "സ്വാസ്ഥ്യ സിങ്ക്", "en-IN": "Swasthya Sync",
+}
+_BRAND_RE = re.compile(r"swasth?ya[\s\-]?sync|स्वास्थ्यसिंक", re.IGNORECASE)
+
+
+def pronounceable(text: str, language_code: str) -> str:
+    """Rewrite words TTS voices tend to spell out (currently the brand name)."""
+    return _BRAND_RE.sub(_BRAND_SPOKEN.get(language_code, "Swasthya Sync"), text or "")
+
+
 def text_to_speech(text: str, language_code: str = "hi-IN", speaker: str | None = None) -> bytes:
     if not (text or "").strip():
         return b""
+    text = pronounceable(text, language_code)
     if SPEECH_PROVIDER == "sarvam":
         return SarvamSpeechProvider().text_to_speech(text, language_code, speaker)
     try:

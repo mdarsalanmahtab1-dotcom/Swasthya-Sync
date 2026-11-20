@@ -708,7 +708,8 @@ async def websocket_session(ws: WebSocket, session_id: str = Query(None)):
                     live = LiveVoice(dm, send, dm_lock, _after_engine_turn)
                     ok = await live.start()
                     await send({"type": "live_status", "state": "active" if ok else "fallback"})
-                    if ok and dm.fsm.state in ("CHIEF_COMPLAINT", "DYNAMIC_INTERVIEW"):
+                    # resume=True: Live re-enabled after a fallback — don't re-speak the current question
+                    if ok and not msg.get("resume") and dm.fsm.state in ("CHIEF_COMPLAINT", "DYNAMIC_INTERVIEW"):
                         last_q = next((m["content"] for m in reversed(dm.record.conversation_history)
                                        if m.get("role") == "assistant"), "")
                         if last_q:

@@ -30,6 +30,7 @@ Fill these in `backend/.env` (never commit this file):
 | `SARVAM_API_KEY` | Sarvam key, so voice input uses Sarvam first. Without it, Gemini Transcribe is used |
 | `STT_PROVIDER` | `sarvam` (default: Sarvam first, Gemini backup) or `google` |
 | `SPEECH_PROVIDER` | `google` (default: Gemini voice for questions) or `sarvam` |
+| `VOICE_MODE` | `live` (default: Gemini Live voice, about 1–4 s per turn, automatic fallback to STT/TTS) or `legacy` |
 
 Start the API:
 ```powershell
@@ -63,4 +64,5 @@ python scripts/eval_intake.py        # 10 synthetic patients -> docs/eval_result
 - **Doctors don't load / "Database unavailable":** open `/ready`. If it says `no pool`, your network is probably blocking port 5432. Change the port in `DATABASE_URL` to `6543`, or switch networks. The backend retries every 20 s.
 - **`Activate.ps1` cannot be loaded:** run the `Set-ExecutionPolicy -Scope Process ...` line again in that terminal.
 - **Port already in use:** close the other terminal running uvicorn or Vite, or run `npx kill-port 8000 5173`.
+- **Gemini Live:** the kiosk speaks and listens through Gemini Live while you hold **Hold to Speak**. If Live fails (for example on bad Wi-Fi), it switches to Gemini STT/TTS automatically and retries Live once at the next question. Set `VITE_VOICE_MODE=legacy` in `frontend/.env.local` to turn Live off in the browser.
 - **Voice is slow:** each Gemini speech call can take several seconds on weak Wi-Fi. Sarvam (`STT_PROVIDER=sarvam` with a key) is usually faster for input.

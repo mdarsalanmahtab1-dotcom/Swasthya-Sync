@@ -10,6 +10,10 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 // Routing is now handled in App.tsx
 import type { OrbState } from '../components/AbstractOrb';
 import { getWsUrl } from '../config';
+import { livePlayer } from '../lib/liveAudio';
+
+/** Gemini Live voice state: off → starting → active, or fallback (Gemini STT/TTS). */
+export type LiveState = 'off' | 'starting' | 'active' | 'fallback';
 
 // Types matching the backend's UI instruction format
 export interface UIOption {
@@ -58,6 +62,9 @@ export interface UIInstruction {
   // Summary/Complete fields
   patient_record?: any;
   patient_name?: string;
+
+  // Gemini Live: 'live' means the prompt was (or is being) spoken by Live — don't TTS it
+  voice?: string;
 }
 
 interface UseConversationReturn {
@@ -71,6 +78,9 @@ interface UseConversationReturn {
   sendRedflag: () => void;
   clearRedflag: () => void;
   getRecord: () => void;
+  liveState: LiveState;
+  startLive: (resume?: boolean) => void;
+  sendRaw: (data: object) => void;
 }
 
 export function useConversation(): UseConversationReturn {
@@ -79,6 +89,7 @@ export function useConversation(): UseConversationReturn {
   const [orbState, setOrbState] = useState<OrbState>('idle');
   const [isConnected, setIsConnected] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [liveState, setLiveState] = useState<LiveState>('off');
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<number | null>(null);
 
@@ -102,6 +113,29 @@ export function useConversation(): UseConversationReturn {
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
+
+        // ── Gemini Live voice stream ──
+        if (msg.type === 'audio_out') {
+          livePlayer.play(msg.data, msg.rate || 24000);
+          return;
+        }
+        if (msg.type === 'audio_out_stop') {
+          livePlayer.stop();
+          return;
+        }
+        if (msg.type === 'audio_out_end') {
+          return;
+        }
+        if (msg.type === 'live_status') {
+          setLiveState(msg.state === 'active' ? 'active' : 'fallback');
+          if (msg.state !== 'active') livePlayer.stop();
+          return;
+        }
+        if (msg.type === 'live_notice') {
+          setIsProcessing(false);
+          setOrbState('idle');
+          return;
+        }
 
         if (msg.type === 'orb_state') {
           setOrbState(msg.orb_state as OrbState);
@@ -149,6 +183,8 @@ export function useConversation(): UseConversationReturn {
     ws.onclose = () => {
       console.log('[WS] Disconnected');
       setIsConnected(false);
+      setLiveState('off'); // the server closes the Live session with the socket
+      livePlayer.stop();
       // Auto-reconnect after 2s
       reconnectTimer.current = window.setTimeout(connect, 2000);
     };
@@ -182,6 +218,7 @@ export function useConversation(): UseConversationReturn {
     sessionId?: string,
     previousHistory?: any
   ) => {
+    setLiveState('off');
     send({
       type: 'start',
       clinic_mode: clinicMode,
@@ -225,6 +262,11 @@ export function useConversation(): UseConversationReturn {
     send({ type: 'get_record' });
   }, [send]);
 
+  const startLive = useCallback((resume = false) => {
+    setLiveState('starting');
+    send({ type: 'live_start', resume });
+  }, [send]);
+
   return {
     ui,
     orbState,
@@ -236,5 +278,8 @@ export function useConversation(): UseConversationReturn {
     sendRedflag,
     clearRedflag,
     getRecord,
+    liveState,
+    startLive,
+    sendRaw: send,
   };
 }

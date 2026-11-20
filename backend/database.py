@@ -49,7 +49,7 @@ async def _create_pool():
         max_size=20,
         max_inactive_connection_lifetime=60.0,
         command_timeout=30.0,
-        timeout=10.0,  # connect timeout: fail fast (503) instead of hanging when the DB is unreachable
+        timeout=float(os.getenv("DB_CONNECT_TIMEOUT", "20")),  # connect timeout (s); 503 instead of hanging
         statement_cache_size=0,
     )
     instance_uri = (os.getenv("ALLOYDB_INSTANCE_URI") or "").strip()

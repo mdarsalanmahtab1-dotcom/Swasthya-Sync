@@ -63,7 +63,7 @@ LIVE_VOICE: str = os.environ.get("GEMINI_LIVE_VOICE", "").strip() or "Kore"
 FAST_TIMEOUT: float = _env_float("GEMINI_FAST_TIMEOUT", 12.0)            # per-turn extraction / questions
 REASONING_TIMEOUT: float = _env_float("GEMINI_REASONING_TIMEOUT", 20.0)  # summary, document entities
 SCHEMA_TIMEOUT: float = _env_float("GEMINI_SCHEMA_TIMEOUT", 25.0)        # one-time interview schema
-LIVE_TIMEOUT: float = _env_float("GEMINI_LIVE_TIMEOUT", 12.0)            # Live: max wait for a reply
+LIVE_TIMEOUT: float = _env_float("GEMINI_LIVE_TIMEOUT", 20.0)            # Live: max wait for a reply
 
 
 def all_configured_models() -> list[str]:

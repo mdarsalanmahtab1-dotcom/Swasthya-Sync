@@ -207,7 +207,9 @@ class LiveVoice:
         In the form phase, a silent note tells Live which field the question is about."""
         if not self.active or not text:
             return
-        msg = f"[KIOSK] SAY: {self._strip_identifiers(text)}"
+        import speech_provider
+        spoken = speech_provider.pronounceable(self._strip_identifiers(text), self.dm.language)
+        msg = f"[KIOSK] SAY: {spoken}"
         field = self.dm.field_by_id(field_id) if field_id else None
         self.current_field_id = field["id"] if field is not None else None
         if field is not None:

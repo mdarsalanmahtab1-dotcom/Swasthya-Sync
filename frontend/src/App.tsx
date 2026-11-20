@@ -129,6 +129,9 @@ function KioskApp() {
     sendInput,
     sendRedflag,
     clearRedflag,
+    liveState,
+    startLive,
+    sendRaw,
   } = useConversation();
 
   const [pendingSession, setPendingSession] = useState<{
@@ -257,6 +260,9 @@ function KioskApp() {
                       sendInput('back', '');
                     }}
                     onRedflag={() => sendRedflag()}
+                    liveState={liveState}
+                    startLive={startLive}
+                    sendRaw={sendRaw}
                   />
                 )}
               </AnimatedRoute>
