@@ -329,6 +329,9 @@ async def upload_document_batch(
         return {"status": "rejected", "reason": result.get("rejection_reason", "Document rejected due to patient name mismatch or invalid format.")}
         
     logger.info(f"batch upload received session_id: {session_id}, in sessions? {session_id in sessions}")
+    if session_id and session_id not in sessions:
+        # The interview session is gone (server restarted): tell the kiosk instead of failing silently
+        return {"status": "session_expired", "reason": "Your session expired. Please start again."}
     if session_id and session_id in sessions:
         dm = sessions[session_id]
         from patient_record import DocumentExtraction
@@ -571,6 +574,10 @@ async def websocket_session(ws: WebSocket, session_id: str = Query(None)):
         logger.info(f"Rehydrated session: {session_id}")
         ui = dm.resume_session()
         await send({"type": "ui", **ui})
+    elif session_id:
+        # Sessions live in memory: after a server restart the kiosk must start again
+        logger.info(f"Unknown session on reconnect: {session_id}")
+        await send({"type": "error", "message": "Session not found or expired"})
 
     try:
         while True:
@@ -652,7 +659,7 @@ async def websocket_session(ws: WebSocket, session_id: str = Query(None)):
 
             elif msg_type == "input":
                 if not dm:
-                    await send({"type": "error", "message": "No active session"})
+                    await send({"type": "error", "message": "Session not found or expired"})
                     continue
                 input_type = msg.get("input_type", "tap")
                 value = msg.get("value", "")
@@ -756,7 +763,7 @@ async def websocket_session(ws: WebSocket, session_id: str = Query(None)):
                 if dm:
                     await send({"type": "record", **dm.get_record()})
                 else:
-                    await send({"type": "error", "message": "No active session"})
+                    await send({"type": "error", "message": "Session not found or expired"})
 
             else:
                 await send({"type": "error", "message": f"Unknown type: {msg_type}"})

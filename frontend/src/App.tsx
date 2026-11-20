@@ -287,6 +287,11 @@ function KioskApp() {
                           body: formData,
                         });
                         const data = await response.json();
+                        if (data.status === 'session_expired') {
+                          localStorage.removeItem('kiosk_session_id');
+                          window.location.assign('/kiosk/login');
+                          return;
+                        }
                         if (data.status === 'rejected') {
                           throw new Error(`Verification Failed: ${data.reason || 'Document mismatch. Please verify and re-upload.'}`);
                         }

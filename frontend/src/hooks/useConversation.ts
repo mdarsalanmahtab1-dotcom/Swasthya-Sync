@@ -172,6 +172,11 @@ export function useConversation(): UseConversationReturn {
           setIsProcessing(false);
           if (msg.message === 'Session not found or expired') {
             localStorage.removeItem('kiosk_session_id');
+            // Mid-interview (after a server restart): go back to the start instead of hanging
+            const path = window.location.pathname;
+            if (path.startsWith('/kiosk/') && !path.startsWith('/kiosk/login')) {
+              window.location.assign('/kiosk/login');
+            }
           }
           return;
         }
