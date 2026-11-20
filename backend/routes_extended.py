@@ -939,25 +939,15 @@ async def generate_and_save_session_pdf(session_id: str, doctor_prescription_ove
                 
         summary_id = f"sum_{uuid.uuid4().hex[:8]}"
         
-        from supabase import create_client
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_KEY")
         pdf_path = None
-        if supabase_url and supabase_key:
+        # Keep a durable private copy in Cloud Storage when configured (no public URL).
+        if os.getenv("GCS_BUCKET"):
             try:
-                supabase = create_client(supabase_url, supabase_key)
-                storage_path = f"patient-documents/{summary_id}.pdf"
-                supabase.storage.from_("patient-records").upload(
-                    file=pdf_bytes,
-                    path=storage_path,
-                    file_options={"content-type": "application/pdf"}
-                )
-                url_resp = supabase.storage.from_("patient-records").get_public_url(storage_path)
-                pdf_path = url_resp
+                import storage
+                storage.upload_bytes(f"casesheets/{summary_id}.pdf", pdf_bytes, "application/pdf")
             except Exception as e:
-                import logging
-                logging.getLogger(__name__).error(f"Supabase upload error for PDF: {e}")
-        
+                logger.error(f"GCS upload error for PDF ({type(e).__name__})")
+
         if not pdf_path:
             pdf_dir = os.path.join(os.path.dirname(__file__), "generated_pdfs")
             os.makedirs(pdf_dir, exist_ok=True)

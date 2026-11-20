@@ -182,6 +182,26 @@ async def create_session(
     return {"session_id": session_id, "ui": ui}
 
 
+@app.get("/api/documents/{doc_id}")
+async def get_document(doc_id: str, index: int = 0, _auth: dict = Depends(require_role("DOCTOR", "NURSE", "ADMIN"))):
+    """Stream an uploaded patient document from private storage (staff only)."""
+    import database, storage
+    if not database._pool:
+        raise HTTPException(status_code=503, detail="DB not ready")
+    async with database._pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT file_path FROM uploaded_documents WHERE document_id = $1", doc_id)
+    if not row or not row["file_path"]:
+        raise HTTPException(status_code=404, detail="Document not found")
+    paths = [p.strip() for p in row["file_path"].split(",") if p.strip()]
+    if index < 0 or index >= len(paths):
+        raise HTTPException(status_code=404, detail="Document not found")
+    data = await asyncio.to_thread(storage.download_bytes, paths[index])
+    if data is None:
+        raise HTTPException(status_code=404, detail="File unavailable")
+    return Response(content=data, media_type=storage.guess_content_type(paths[index]),
+                    headers={"Cache-Control": "private, no-store"})
+
+
 @app.get("/api/record/{session_id}")
 async def get_record(session_id: str, _auth: dict = Depends(require_role("DOCTOR", "NURSE", "ADMIN"))):
     """Get the full patient record for a session."""
@@ -215,35 +235,13 @@ async def upload_document(
     content_type = _check_image(file.content_type, image_bytes)
     logger.info(f"OCR upload: session={session_id} size={len(image_bytes)}B type={content_type}")
     
-    from supabase import create_client
     import uuid
-    safe_filename = f"{uuid.uuid4().hex[:8]}_{file.filename or 'doc.jpg'}"
-    
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_KEY")
+    import storage
+    safe_filename = f"{uuid.uuid4().hex[:8]}_{storage._safe_name(file.filename or 'doc.jpg')}"
+    # Private bucket (or non-public local folder in dev); no public or signed URLs.
+    storage_path = await asyncio.to_thread(
+        storage.upload_bytes, f"patient-documents/{safe_filename}", image_bytes, content_type)
 
-    if not (supabase_url and supabase_key):
-        raise HTTPException(status_code=500, detail="Supabase configuration is missing.")
-
-    supabase = create_client(supabase_url, supabase_key)
-    storage_path = f"patient-documents/{safe_filename}"
-    try:
-        supabase.storage.from_("patient-records").upload(
-            file=image_bytes,
-            path=storage_path,
-            file_options={"content-type": content_type}
-        )
-        url_resp = supabase.storage.from_("patient-records").create_signed_url(storage_path, 2592000)
-        storage_path = url_resp.get("signedURL", storage_path)
-    except Exception as e:
-        logger.warning(f"Supabase upload failed ({e}), falling back to local storage.")
-        local_dir = os.path.join(os.path.dirname(__file__), "uploads")
-        os.makedirs(local_dir, exist_ok=True)
-        local_path = os.path.join(local_dir, safe_filename)
-        with open(local_path, "wb") as f:
-            f.write(image_bytes)
-        storage_path = f"/uploads/{safe_filename}"
-        
     result = await process_document(image_bytes, filename=file.filename or "doc.jpg", media_type=content_type)
     result["image_url"] = storage_path
 
@@ -296,38 +294,18 @@ async def upload_document_batch(
     media_types = []
     storage_paths = []
     
-    from supabase import create_client
     import uuid
-    
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_KEY")
-    if not (supabase_url and supabase_key):
-        raise HTTPException(status_code=500, detail="Supabase configuration is missing.")
-        
-    supabase = create_client(supabase_url, supabase_key)
-    
+    import storage
+
     for file in files:
         img_bytes = await file.read()
         ctype = _check_image(file.content_type, img_bytes)
         image_bytes_list.append(img_bytes)
         media_types.append(ctype)
         
-        safe_filename = f"{uuid.uuid4().hex[:8]}_{file.filename or 'doc.jpg'}"
-        storage_path = f"patient-documents/{safe_filename}"
-        try:
-            supabase.storage.from_("patient-records").upload(
-                file=img_bytes, path=storage_path, file_options={"content-type": ctype}
-            )
-            url_resp = supabase.storage.from_("patient-records").create_signed_url(storage_path, 2592000)
-            storage_paths.append(url_resp.get("signedURL", storage_path))
-        except Exception as e:
-            logger.warning(f"Supabase upload failed ({e}), falling back to local storage.")
-            local_dir = os.path.join(os.path.dirname(__file__), "uploads")
-            os.makedirs(local_dir, exist_ok=True)
-            local_path = os.path.join(local_dir, safe_filename)
-            with open(local_path, "wb") as f:
-                f.write(img_bytes)
-            storage_paths.append(f"/uploads/{safe_filename}")
+        safe_filename = f"{uuid.uuid4().hex[:8]}_{storage._safe_name(file.filename or 'doc.jpg')}"
+        storage_paths.append(await asyncio.to_thread(
+            storage.upload_bytes, f"patient-documents/{safe_filename}", img_bytes, ctype))
 
     from ocr_pipeline import process_batch_ocr
     result = await process_batch_ocr(image_bytes_list, media_types, patient_name)

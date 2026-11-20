@@ -86,8 +86,16 @@ def _compress_image_to_base64(image_path: str) -> str:
     img_bytes = None
     clean_path = str(image_path).strip()
     
-    # 1. Remote HTTP/HTTPS URL (e.g. Supabase Storage signed URL)
-    if clean_path.startswith("http://") or clean_path.startswith("https://"):
+    # 0. Private storage (gs://bucket/object or local:<file>) — read via storage.py
+    if clean_path.startswith("gs://") or clean_path.startswith("local:"):
+        import storage
+        img_bytes = storage.download_bytes(clean_path)
+        if not img_bytes:
+            logger.error("Failed to read stored document image")
+            return ""
+
+    # 1. Remote HTTP/HTTPS URL (legacy Supabase Storage signed URL)
+    elif clean_path.startswith("http://") or clean_path.startswith("https://"):
         try:
             req = urllib.request.Request(
                 clean_path,
@@ -96,7 +104,7 @@ def _compress_image_to_base64(image_path: str) -> str:
             with urllib.request.urlopen(req, timeout=12) as resp:
                 img_bytes = resp.read()
         except Exception as e:
-            logger.error(f"Failed to fetch image from URL {clean_path[:80]}...: {e}")
+            logger.error(f"Failed to fetch legacy image URL ({type(e).__name__})")
             return ""
             
     # 2. Local file path
