@@ -151,6 +151,7 @@ def speech_to_text(
         "wav":  "audio/wav",
         "mp3":  "audio/mp3",
         "ogg":  "audio/ogg",
+        "mp4":  "audio/mp4",
     }
     mime_type = mime_map.get(audio_format, "audio/webm")
     filename = f"audio.{audio_format}"
@@ -176,7 +177,7 @@ def speech_to_text(
 
         # Log full response for debugging — critical for catching API errors
         if response.status_code != 200:
-            logger.error(f"Sarvam STT non-200 response: {response.status_code} — {response.text}")
+            logger.error(f"Sarvam STT non-200 response: {response.status_code}")
             return {
                 "transcript": "",
                 "language_code": hint_language,
@@ -185,7 +186,6 @@ def speech_to_text(
             }
 
         data = response.json()
-        logger.info(f"Sarvam STT raw response: {data}")
 
         transcript = data.get("transcript", "")
         detected_lang = data.get("language_code", hint_language)
@@ -199,7 +199,7 @@ def speech_to_text(
 
     except httpx.HTTPStatusError as e:
         elapsed = time.time() - t0
-        logger.error(f"Sarvam STT HTTP error after {elapsed:.2f}s: {e.response.status_code} — {e.response.text}")
+        logger.error(f"Sarvam STT HTTP error after {elapsed:.2f}s: {e.response.status_code}")
         return {
             "transcript": "",
             "language_code": hint_language,

@@ -1,10 +1,13 @@
 """
 SwasthyaSync — speech provider (STT + TTS).
 
-SPEECH_PROVIDER=google (default) -> Gemini Transcribe (GEMINI_STT_MODEL) + Gemini TTS (GEMINI_TTS_MODEL)
-SPEECH_PROVIDER=sarvam           -> existing sarvam_client (saaras / bulbul)
-
-If the Google provider fails and SARVAM_API_KEY is set, we fall back to Sarvam.
+Speech-to-text  (STT_PROVIDER):
+  sarvam (default) -> Sarvam saaras:v3 first; Gemini Transcribe (GEMINI_STT_MODEL) as backup
+                      if Sarvam errors or SARVAM_API_KEY is missing
+  google           -> Gemini Transcribe first; Sarvam as backup when SARVAM_API_KEY is set
+Text-to-speech  (SPEECH_PROVIDER):
+  google (default) -> Gemini TTS (GEMINI_TTS_MODEL); Sarvam backup when SARVAM_API_KEY is set
+  sarvam           -> Sarvam bulbul (also makes STT default to Sarvam)
 Return shapes are exactly what sarvam_client returns, so main.py and the frontend don't change:
   speech_to_text(...) -> {"transcript", "language_code", "language_name", optional "error"}
   text_to_speech(...) -> WAV bytes (b"" on failure)
@@ -37,7 +40,8 @@ import model_config
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-SPEECH_PROVIDER = (os.environ.get("SPEECH_PROVIDER", "google") or "google").strip().lower()
+SPEECH_PROVIDER = (os.environ.get("SPEECH_PROVIDER", "google") or "google").strip().lower()   # TTS
+STT_PROVIDER = (os.environ.get("STT_PROVIDER", "sarvam") or "sarvam").strip().lower()        # STT
 
 MAX_STT_BYTES = 2 * 1024 * 1024          # 2 MB
 MAX_STT_SECONDS = 60
@@ -264,9 +268,32 @@ def _sarvam_available() -> bool:
     return bool(os.environ.get("SARVAM_API_KEY", "").strip())
 
 
+def _sarvam_stt_ok(res: dict) -> bool:
+    """Sarvam reports failures as an 'error' key. 'Audio too short' is a real answer, not an outage."""
+    err = (res or {}).get("error")
+    return not err or err == "Audio too short"
+
+
 def speech_to_text(audio_bytes: bytes, hint_language: str = "hi-IN", fmt: str = "webm") -> dict:
-    if SPEECH_PROVIDER == "sarvam":
-        return SarvamSpeechProvider().speech_to_text(audio_bytes, hint_language, fmt)
+    sarvam_first = STT_PROVIDER == "sarvam" or SPEECH_PROVIDER == "sarvam"
+    if sarvam_first:
+        if _sarvam_available():
+            try:
+                res = SarvamSpeechProvider().speech_to_text(audio_bytes, hint_language, fmt)
+                if _sarvam_stt_ok(res):
+                    return res
+                logger.warning("Sarvam STT returned an error — falling back to Gemini Transcribe")
+            except Exception as e:
+                logger.warning(f"Sarvam STT failed ({type(e).__name__}) — falling back to Gemini Transcribe")
+        else:
+            logger.info("SARVAM_API_KEY not set — using Gemini Transcribe")
+        try:
+            return GoogleSpeechProvider().speech_to_text(audio_bytes, hint_language, fmt)
+        except Exception as e:
+            logger.error(f"Gemini Transcribe backup failed ({type(e).__name__})")
+            return _stt_result("", hint_language, "Speech recognition unavailable")
+
+    # STT_PROVIDER=google: Gemini first, Sarvam backup
     try:
         return GoogleSpeechProvider().speech_to_text(audio_bytes, hint_language, fmt)
     except Exception as e:
@@ -274,7 +301,9 @@ def speech_to_text(audio_bytes: bytes, hint_language: str = "hi-IN", fmt: str = 
         if _sarvam_available():
             logger.info("Falling back to Sarvam STT")
             try:
-                return SarvamSpeechProvider().speech_to_text(audio_bytes, hint_language, fmt)
+                res = SarvamSpeechProvider().speech_to_text(audio_bytes, hint_language, fmt)
+                if _sarvam_stt_ok(res):
+                    return res
             except Exception as e2:
                 logger.error(f"Sarvam STT fallback failed ({type(e2).__name__})")
         return _stt_result("", hint_language, "Speech recognition unavailable")
