@@ -17,6 +17,7 @@ The Dialogue Manager:
 from __future__ import annotations
 import asyncio
 import logging
+import re
 
 from macro_fsm import MacroFSM
 from patient_record import PatientRecord, SlotValue, RedFlagEntry
@@ -41,6 +42,28 @@ def _normalize_answer(value) -> str:
     if low in ("false", "no", "n", "absent", "negative", "none"):
         return "No"
     return v
+
+
+_OPEN_Q_EN = re.compile(r"^\s*(what|when|where|which|how|why|who|describe|tell)\b", re.I)
+_YESNO_Q_EN = re.compile(r"^\s*(do|does|did|is|are|was|were|have|has|had|can|could|any|will|would|should)\b", re.I)
+# Words that open a yes/no question in Indic languages (Hindi/Marathi, Bengali, Gujarati, Punjabi, Odia)
+_YESNO_Q_INDIC = ("क्या", "कि ", "কি", "কী", "শুধু", "શું", "ਕੀ", "କଣ", "କି")
+_OPEN_Q_INDIC = ("कब", "कहाँ", "कहां", "कैसे", "कितन", "कौन", "क्यों", "কখন", "কোথায়", "কত", "কেমন", "ક્યારે", "ਕਦੋਂ", "ਕਿੱਥੇ")
+
+
+def _is_yes_no_question(field: dict, spoken_text: str) -> bool:
+    """Show Yes/No buttons only for yes/no questions; open questions ("when…", "where…")
+    get just "Not sure" (the patient speaks or types the real answer)."""
+    text = (spoken_text or "").strip()
+    intent = str(field.get("question_intent", "") or "")
+    if _OPEN_Q_EN.match(text) or any(w in text for w in _OPEN_Q_INDIC):
+        return False
+    if _YESNO_Q_EN.match(text) or any(text.startswith(w) or f" {w}" in text[:40] for w in _YESNO_Q_INDIC):
+        return True
+    # Fall back to the field's English intent
+    if _OPEN_Q_EN.match(intent) or re.search(r"\b(when|where|how long|how many|how much|which|duration|location|character|severity|onset)\b", intent, re.I):
+        return False
+    return bool(_YESNO_Q_EN.match(intent) or re.search(r"\b(presence|history of|yes/no|any)\b", intent, re.I))
 
 
 # Tap options shown under questions spoken by Gemini Live
@@ -632,13 +655,13 @@ class DialogueManager:
         """UI for a question Gemini Live just spoke (recorded in the transcript for the doctor)."""
         self.record.add_conversation_message("assistant", spoken_text, field.get("category", "HPI"))
         yes, no, unsure = _YES_NO.get(self.language, _YES_NO["en-IN"])
+        options = [{"label": "Not sure", "label_translated": unsure}]
+        if _is_yes_no_question(field, spoken_text):
+            options = [{"label": "Yes", "label_translated": yes},
+                       {"label": "No", "label_translated": no}] + options
         result = conversation_engine.ConversationResult({
             "spoken_text": spoken_text,
-            "suggested_options": [
-                {"label": "Yes", "label_translated": yes},
-                {"label": "No", "label_translated": no},
-                {"label": "Not sure", "label_translated": unsure},
-            ],
+            "suggested_options": options,
             "extracted_fields": {}, "red_flag_check": None, "reasoning": "live",
             "current_category": field.get("category", "HPI"),
         })
