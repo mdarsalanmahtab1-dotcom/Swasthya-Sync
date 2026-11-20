@@ -54,7 +54,7 @@ interface Props {
   sendRaw?: (data: object) => void;
 }
 
-const VOICE_MODE = (import.meta.env.VITE_VOICE_MODE as string | undefined) || 'live';
+const VOICE_MODE = (import.meta.env.VITE_VOICE_MODE as string | undefined) || 'legacy';
 
 function useLiveAudioState() {
   const [, force] = useState(0);

@@ -39,7 +39,7 @@ def _env_list(name: str, default: str) -> list[str]:
 
 
 FAST_MODELS: list[str] = _env_list("GEMINI_FAST_MODELS", "gemini-3.5-flash-lite,gemini-flash-lite-latest")
-REASONING_MODELS: list[str] = _env_list("GEMINI_REASONING_MODELS", "gemini-3.8-flash,gemini-3.5-flash-lite")
+REASONING_MODELS: list[str] = _env_list("GEMINI_REASONING_MODELS", "gemini-3.5-flash-lite,gemini-3.8-flash")
 VISION_MODELS: list[str] = _env_list("GEMINI_VISION_MODELS", "gemini-3.8-flash,gemini-3.5-flash-lite")
 STT_MODEL: str = os.environ.get("GEMINI_STT_MODEL", "").strip() or "gemini-3.5-transcribe"
 TTS_MODEL: str = os.environ.get("GEMINI_TTS_MODEL", "").strip() or "gemini-3.8-flash-lite-tts"
@@ -54,7 +54,7 @@ def _env_float(name: str, default: float) -> float:
 
 # Gemini Live (low-latency voice). VOICE_MODE=live uses it with automatic fallback to the
 # STT/TTS pipeline; VOICE_MODE=legacy disables it.
-VOICE_MODE: str = (os.environ.get("VOICE_MODE", "live") or "live").strip().lower()
+VOICE_MODE: str = (os.environ.get("VOICE_MODE", "legacy") or "legacy").strip().lower()
 LIVE_MODEL: str = os.environ.get("GEMINI_LIVE_MODEL", "").strip() or "gemini-3.8-live"
 LIVE_VOICE: str = os.environ.get("GEMINI_LIVE_VOICE", "").strip() or "Kore"
 

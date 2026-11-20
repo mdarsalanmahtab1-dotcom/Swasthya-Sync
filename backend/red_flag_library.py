@@ -9,6 +9,7 @@ This is the NON-NEGOTIABLE safety floor that operates independently of the LLM l
 """
 
 from __future__ import annotations
+import re
 from patient_record import RedFlagEntry
 
 
@@ -153,10 +154,30 @@ def _val(filled_state: dict, field_id: str) -> str:
     return str(v).lower().strip()
 
 
+# Keywords that ARE the red-flag finding when present (e.g. "cannot bear weight", "no movement").
+# A negation never cancels these.
+_NEGATIVE_FINDING_KEYWORDS = {"no", "nahi", "cannot", "unable", "not", "reduced", "absent", "less", "decreased", "nil"}
+_NEGATION_WORDS = r"(?:no|not|none|nil|never|denies|denied|without|negative|absent|nahi|nahin)"
+
+
+def _negated(val: str, kw: str) -> bool:
+    """True if the keyword is negated in this answer: the answer starts with a negation
+    ("No weakness in arms or legs") or a negation word sits right before it ("denies chest pain")."""
+    if re.match(rf"^\s*{_NEGATION_WORDS}\b", val):
+        return True
+    return bool(re.search(rf"\b{_NEGATION_WORDS}\b(?:\s+\w+){{0,2}}\s+{re.escape(kw)}", val))
+
+
 def _has(filled_state: dict, field_id: str, keywords: list[str]) -> bool:
-    """Check if a field value contains any of the keywords."""
+    """Check if a field value contains any of the keywords — ignoring negated mentions,
+    so "No weakness in arms or legs" does NOT match "weakness"."""
     val = _val(filled_state, field_id)
-    return any(kw in val for kw in keywords)
+    for kw in keywords:
+        if kw not in val:
+            continue
+        if kw in _NEGATIVE_FINDING_KEYWORDS or not _negated(val, kw):
+            return True
+    return False
 
 
 SAFETY_RULES: list[dict] = [
