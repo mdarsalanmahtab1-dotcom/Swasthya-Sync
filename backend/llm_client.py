@@ -464,7 +464,7 @@ def strip_identifiers(obj, _in_person: bool = False):
     return obj
 
 
-def generate_clinical_summary(filled_state: dict, doc_extractions: list = None) -> dict:
+def generate_clinical_summary(filled_state: dict, doc_extractions: list = None, demographics: dict | None = None) -> dict:
     """Synthesize the Q&A state into a structured 200-word clinical narrative."""
     client = _get_client()
     if client is None:
@@ -478,12 +478,18 @@ Output JSON format:
   "critical_highlights": ["Finding 1", "Finding 2"],
   "contradictions": ["Contradiction 1", "Contradiction 2"]
 }
-Keep it objective and medically accurate."""
+Keep it objective and medically accurate.
+The REGISTERED age and sex (from kiosk registration) are authoritative. If a document shows a different
+age or sex, use the registered values in the narrative and list the mismatch under "contradictions".
+Report only what the patient said or the documents show; do not add symptoms or diagnoses."""
 
     # Privacy: drop direct identifiers (names, phone, ABHA, address, file paths) before the LLM sees them.
     safe_state = strip_identifiers(filled_state)
     safe_docs = strip_identifiers(doc_extractions or [])
-    user_prompt = f"Patient Q&A History:\n{json.dumps(safe_state, indent=2, ensure_ascii=False)}\n\nDocument Extractions:\n{json.dumps(safe_docs, indent=2, ensure_ascii=False)}"
+    demo = demographics or {}
+    reg = (f"Registered patient (authoritative): age {demo.get('age') or 'unknown'}, "
+           f"sex {demo.get('sex') or 'unknown'}\n\n")
+    user_prompt = reg + f"Patient Q&A History:\n{json.dumps(safe_state, indent=2, ensure_ascii=False)}\n\nDocument Extractions:\n{json.dumps(safe_docs, indent=2, ensure_ascii=False)}"
     
     try:
         return _generate_json_with_retry(

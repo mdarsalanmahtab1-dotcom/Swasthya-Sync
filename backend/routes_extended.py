@@ -825,7 +825,25 @@ async def generate_and_save_session_pdf(session_id: str, doctor_prescription_ove
                 "critical_highlights": []
             }
         else:
-            ai_summary = generate_clinical_summary(filled_state_json, doc_extractions_list)
+            # Registered demographics are authoritative (documents may show a different age)
+            demographics = {
+                "age": p_info["age"] if p_info else None,
+                "sex": p_info["gender"] if p_info else None,
+            }
+            ai_summary = generate_clinical_summary(filled_state_json, doc_extractions_list, demographics)
+
+        # Red-flag reasons for the casesheet banner: what the safety rules actually found
+        flag_reasons = []
+        if dm and getattr(dm.record, "red_flags", None):
+            flag_reasons = [f.description for f in dm.record.red_flags]
+        elif isinstance(filled_state_json, dict) and filled_state_json.get("red_flags"):
+            flag_reasons = [f.get("description", "") for f in filled_state_json["red_flags"] if isinstance(f, dict)]
+        if not flag_reasons and isinstance(filled_state_json, dict):
+            import red_flag_library
+            plain_state = filled_state_json.get("filled_state", filled_state_json)
+            if isinstance(plain_state, dict):
+                flag_reasons = [f.description for f in red_flag_library.check_safety(plain_state)]
+        flag_reasons = [r for i, r in enumerate(flag_reasons) if r and r not in flag_reasons[:i]]
 
         ocr_data = {
             "extracted_medications": extracted_medications,
@@ -905,8 +923,9 @@ async def generate_and_save_session_pdf(session_id: str, doctor_prescription_ove
             "doctor_license": doctor_license,
             "room_no": room_no,
             "vitals": parsed_vitals,
-            "red_flag_active": bool(q_row["priority_flag"]) if q_row else False,
-            "triage_reason": q_row["priority_reason"] if q_row else "",
+            "red_flag_active": bool(q_row["priority_flag"]) if q_row else bool(flag_reasons),
+            "triage_reason": (q_row["priority_reason"] if q_row and q_row["priority_reason"] else "")
+                             or "; ".join(flag_reasons) or "Flagged by the kiosk safety rules",
             "ai_summary": ai_summary,
             "ocr_data": ocr_data,
             "uploaded_images": uploaded_images,
