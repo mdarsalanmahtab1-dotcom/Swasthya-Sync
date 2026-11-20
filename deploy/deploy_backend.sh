@@ -13,7 +13,7 @@
 #                      between requests.
 #  --cpu 2 --memory 2Gi  Headless Chromium (Playwright) renders the PDF casesheet.
 #  --set-secrets       Keys come from Secret Manager, never from the image or the repo.
-#  "^@^"               Changes gcloud's list separator to "@" so values containing commas
+#  "^;^"               Changes gcloud's list separator to ";" so values containing commas or "@"
 #                      (CORS_ORIGINS, model lists) are not split.
 set -euo pipefail
 : "${PROJECT_ID:?Set PROJECT_ID}"
@@ -27,6 +27,6 @@ gcloud run deploy swasthyasync-api --source backend --region "$REGION" --project
   --max-instances 1 --min-instances 0 --cpu-throttling --session-affinity --timeout 3600 \
   --cpu 1 --memory 2Gi \
   --set-secrets "$SECRETS" \
-  --set-env-vars "^@^VOICE_MODE=legacy@SPEECH_PROVIDER=google@CORS_ORIGINS=https://${PROJECT_ID}.web.app,https://${PROJECT_ID}.firebaseapp.com@GCS_BUCKET=${BUCKET}@ADMIN_EMAIL=${ADMIN_EMAIL:-admin@swasthyasync.local}@OTP_PROVIDER=mock"
+  --set-env-vars "^;^VOICE_MODE=legacy;SPEECH_PROVIDER=google;CORS_ORIGINS=https://${PROJECT_ID}.web.app,https://${PROJECT_ID}.firebaseapp.com;GCS_BUCKET=${BUCKET};ADMIN_EMAIL=${ADMIN_EMAIL:-admin@swasthyasync.local};OTP_PROVIDER=mock"
 
 gcloud run services describe swasthyasync-api --region "$REGION" --project "$PROJECT_ID" --format='value(status.url)'

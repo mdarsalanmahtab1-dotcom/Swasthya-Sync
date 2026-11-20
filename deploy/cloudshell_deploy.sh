@@ -91,7 +91,7 @@ gcloud run deploy "$SERVICE" --source backend --region "$REGION" \
   --max-instances 1 $SCALE_FLAGS --session-affinity --timeout 3600 \
   --cpu 1 --memory 2Gi \
   --set-secrets "$SECRETS" \
-  --set-env-vars "^@^CORS_ORIGINS=https://${PROJECT_ID}.web.app,https://${PROJECT_ID}.firebaseapp.com@GCS_BUCKET=${BUCKET}@ADMIN_EMAIL=${ADMIN_EMAIL}@OTP_PROVIDER=mock@VOICE_MODE=legacy@SPEECH_PROVIDER=google@STT_PROVIDER=sarvam" \
+  --set-env-vars "^;^CORS_ORIGINS=https://${PROJECT_ID}.web.app,https://${PROJECT_ID}.firebaseapp.com;GCS_BUCKET=${BUCKET};ADMIN_EMAIL=${ADMIN_EMAIL};OTP_PROVIDER=mock;VOICE_MODE=legacy;SPEECH_PROVIDER=google;STT_PROVIDER=sarvam" \
   --quiet
 API_URL="$(gcloud run services describe "$SERVICE" --region "$REGION" --format='value(status.url)')"
 echo "   backend: ${API_URL}"
