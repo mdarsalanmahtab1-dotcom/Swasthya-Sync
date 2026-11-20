@@ -49,6 +49,7 @@ async def _create_pool():
         max_size=20,
         max_inactive_connection_lifetime=60.0,
         command_timeout=30.0,
+        timeout=10.0,  # connect timeout: fail fast (503) instead of hanging when the DB is unreachable
         statement_cache_size=0,
     )
     instance_uri = (os.getenv("ALLOYDB_INSTANCE_URI") or "").strip()
@@ -115,8 +116,21 @@ async def close_db_pool():
         logger.info("Database pool closed.")
 
 async def setup_database():
-    """Initializes the connection pool. Schema creation is handled by migration script."""
+    """Initializes the connection pool. Schema creation is handled by migration script.
+    If the DB is unreachable at startup, keep retrying in the background (no restart needed)."""
     await init_db_pool()
+    if _pool is None:
+        asyncio.create_task(_reconnect_loop())
+
+
+async def _reconnect_loop(interval: float = 20.0):
+    while _pool is None:
+        await asyncio.sleep(interval)
+        try:
+            await init_db_pool()
+        except Exception as e:
+            logger.warning(f"DB reconnect attempt failed ({type(e).__name__})")
+    logger.info("Database reconnected.")
 
 async def get_active_doctors() -> list[dict]:
     """Fetch active doctors from the database."""

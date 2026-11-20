@@ -133,9 +133,21 @@ from routes_extended import require_role  # server-side staff auth
 
 @app.exception_handler(Exception)
 async def _unhandled_error(request, exc):
-    """Never return stack traces or internal error text to clients."""
+    """Never return stack traces or internal error text to clients.
+
+    This handler runs outside CORSMiddleware, so CORS headers are added here; otherwise the
+    browser hides the real status and reports a generic network failure.
+    """
+    import asyncpg
+    db_down = isinstance(exc, (TimeoutError, ConnectionError, OSError, asyncpg.PostgresConnectionError,
+                               asyncpg.InterfaceError))
     logger.error(f"Unhandled error on {request.method} {request.url.path}: {type(exc).__name__}")
-    return JSONResponse(status_code=500, content={"error": "Internal server error"})
+    status, body = (503, {"error": "Database unavailable — please try again"}) if db_down         else (500, {"error": "Internal server error"})
+    headers = {}
+    origin = request.headers.get("origin")
+    if origin and origin in CORS_ORIGINS:
+        headers = {"Access-Control-Allow-Origin": origin, "Access-Control-Allow-Credentials": "true", "Vary": "Origin"}
+    return JSONResponse(status_code=status, content=body, headers=headers)
 app.include_router(extended_router)
 app.include_router(admin_router)
 set_sessions_ref(sessions)  # Bridge: let routes_extended read live PatientRecord data
