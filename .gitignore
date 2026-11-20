@@ -25,7 +25,10 @@ backend/test.pdf
 backend/scratch_*.py
 backend/test_otp_provider.py
 artifacts/
-.agents/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/clinical-intake-guardrails/
 
 # OS
 .DS_Store
